@@ -50,12 +50,6 @@ class VideoDataset(Dataset):
         self.video_paths = video_paths
         self.good_videos = []
 
-        if not self.train:
-            # repeat 15 times
-            self.video_paths = []
-            for _ in range(15):
-                self.video_paths.extend(video_paths)
-
         logger.info(f"Number of videos: {len(self.video_paths)}")
 
     def __len__(self):

@@ -67,10 +67,17 @@ class VideoDataModule(LightningDataModule):
         # load and split datasets only if not loaded already
 
         # for evals
-        video_paths_train = np.load("data/kinetics_400_train_label.npy")
-        video_paths_val = np.load("data/kinetics_400_val_label.npy")
-        self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
-        self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+        if "k400" in self.hparams.cfg.training_type:
+            video_paths_train = np.load("data/kinetics_400_train_label.npy")
+            video_paths_val = np.load("data/kinetics_400_val_label.npy")
+            self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
+            self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+        
+        elif "cater" in self.hparams.cfg.training_type:
+            video_paths_train = np.load("data/cater_train_label.npy")
+            video_paths_val = np.load("data/cater_val_label.npy")
+            self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
+            self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
 
     def train_dataloader(self):
         dataloader = DataLoader(

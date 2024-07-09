@@ -74,12 +74,6 @@ class ImageDataModule(LightningDataModule):
                 if(self.hparams.train):
                     self.data_train = build_imagenet_dataset(True, self.hparams.cfg)
                 self.data_val = build_imagenet_dataset(False, self.hparams.cfg)
-
-            elif self.hparams.cfg.dataset_type=="k400":
-                if(self.hparams.train):
-                    self.data_train = build_imagenet_dataset(True, self.hparams.cfg)
-                self.data_val = build_imagenet_dataset(False, self.hparams.cfg)
-
                 
     def train_dataloader(self):
         

@@ -543,7 +543,7 @@ class GMAELitModule(LightningModule):
             self.generate(batch, batch_idx)
             return {"loss": 0}
 
-        if "mae" in self.cfg.training_type or "vit" in self.cfg.training_type:
+        if "mae" in self.cfg.training_type or "vit" in self.cfg.training_type or self.cfg.dataset_type=="video":
             loss_dict, extra, logits_cls = self.step(batch, batch_idx, return_images=False)
         else:
             loss_dict, extra, logits_cls, pred = self.step(batch, batch_idx, return_images=True)
@@ -596,7 +596,7 @@ class GMAELitModule(LightningModule):
     def on_validation_epoch_end(self):
         log.info("\n " + self.cfg.storage_folder +  " : Validation epoch " + str(self.current_epoch) + " ended.")
 
-        if "mae" not in self.cfg.training_type and "vit" not in self.cfg.training_type:
+        if "mae" not in self.cfg.training_type and "vit" not in self.cfg.training_type and self.cfg.dataset_type!="video":
 
             total_mse = self.test_mse.compute()
             self.log(f"mse", total_mse, sync_dist=True)
