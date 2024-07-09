@@ -51,4 +51,17 @@ pip install -e .
 
 ## Usage
 
-see specific projects.
+create a dataset, this will create a list of paths and labels for the imagenet dataset
+
+```bash
+python chewbacca/utils/imagenet.py <path/to/imagenet>
+python chewbacca/utils/k400.py </path/to/k400>
+```
+
+train the model
+
+```bash
+./scripts/launch_gmae.sh
+```
+
+```
