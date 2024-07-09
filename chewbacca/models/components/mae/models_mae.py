@@ -385,14 +385,12 @@ class MaskedAutoencoderViT(nn.Module):
     #     return x
 
     def forward_decoder(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1):
-        import ipdb; ipdb.set_trace()
         
         if limit_gaussian > 0:
             limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
         else:
             limit_gaussian = int(self.num_points * self.scale_vocab)
 
-        # import ipdb; ipdb.set_trace()
         x_ = self.decoder_embed(x)
         # choose pos embed for only the encoded patches
         ids_shuffle = torch.argsort(ids_restore, dim=1)

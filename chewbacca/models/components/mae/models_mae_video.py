@@ -213,7 +213,6 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             limit_gaussian = int(self.num_points * self.scale_vocab)
 
-        # import ipdb; ipdb.set_trace()
         x_ = self.decoder_embed(x)
         # choose pos embed for only the encoded patches
         ids_shuffle = torch.argsort(ids_restore, dim=1)

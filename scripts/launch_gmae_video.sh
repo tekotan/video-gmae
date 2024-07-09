@@ -50,7 +50,7 @@
 # python chewbacca/train.py -m \
 # --config-name gmae.yaml \
 # hydra/launcher=submitit_slurm \
-# launcher=slurm_scavenge \
+# launcher=slurm_dev \
 # model._target_="chewbacca.models.gmae.GMAELitModule" \
 # datamodule._target_="chewbacca.datamodules.video_datamodule.VideoDataModule" \
 # task_name=vit_base_cater_test1 \
@@ -73,7 +73,7 @@
 # configs.warmup_steps=20 \
 # trainer.max_epochs=400 \
 # configs.seq_length=12 \
-# configs.sample_rate=8 \
+# configs.sample_rate=1 \
 # configs.num_classes=400 \
 # configs.load_strict=False \
 # configs.dataset_type="video" \

@@ -446,24 +446,24 @@ class GMAELitModule(LightningModule):
                             pred_ = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian_z=j)
                             preds_all.append(pred_)
                         preds_2 = torch.stack(preds_all, dim=0)
-                        preds_a = preds_2[:, :, 0].permute(1, 2, 0, 3, 4).reshape(preds_2.shape[1], preds_2.shape[3], preds_2.shape[0]*preds_2.shape[4], 3)
-                        preds_b = preds_2[:, :, 1].permute(1, 2, 0, 3, 4).reshape(preds_2.shape[1], preds_2.shape[3], preds_2.shape[0]*preds_2.shape[4], 3)
-                        preds_a = (preds_a.detach().cpu().numpy() * 255).astype(np.uint8)
-                        preds_b = (preds_b.detach().cpu().numpy() * 255).astype(np.uint8)
+                        pred_ab = []
+                        for i in range(preds_2.shape[2]):
+                            TMP_ = preds_2[:, :, i].permute(1, 2, 0, 3, 4).reshape(preds_2.shape[1], preds_2.shape[3], preds_2.shape[0]*preds_2.shape[4], 3)
+                            TMP_ = (TMP_.detach().cpu().numpy() * 255).astype(np.uint8)
+                            pred_ab.append(TMP_)
 
+                    final_image_ = []
+                    for i in range(len(pred_ab)):
+                        final_image = np.concatenate([imgs[:, i], pred_ab[i]], axis=2).reshape(-1, (imgs[:, 0].shape[2]+pred_ab[0].shape[2]), 3)
+                        final_image_.append(final_image[:, :, ::-1])
 
-                    final_image_a = np.concatenate([imgs[:, 0], preds_a], axis=2).reshape(-1, (imgs[:, 0].shape[2]+preds_a.shape[2]), 3)
-                    final_image_b = np.concatenate([imgs[:, 1], preds_b], axis=2).reshape(-1, (imgs[:, 0].shape[2]+preds_b.shape[2]), 3)
-
-                    # final_image_a = final_image_a[:, :, ::-1]
-                    # final_image_b = final_image_b[:, :, ::-1]
                     # save final image with epoch and batch index
                     train_ = "train" if self.training else "val"
                     global_rank = self.trainer.global_rank
                     if global_rank==0:
                         # cv2.imwrite(self.cfg.storage_folder + f"/results/{train_}_{self.current_epoch}_{batch_idx}.png", final_image)
                         # make video with final_image_a, final_image_b using moviepy
-                        clip = ImageSequenceClip([final_image_a, final_image_b], fps=1)  # fps can be adjusted to your need
+                        clip = ImageSequenceClip(final_image_, fps=1)  # fps can be adjusted to your need
                         clip.write_videofile(f"{self.cfg.storage_folder}/results/{train_}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
 
