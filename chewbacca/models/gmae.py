@@ -455,7 +455,10 @@ class GMAELitModule(LightningModule):
                     final_image_ = []
                     for i in range(len(pred_ab)):
                         final_image = np.concatenate([imgs[:, i], pred_ab[i]], axis=2).reshape(-1, (imgs[:, 0].shape[2]+pred_ab[0].shape[2]), 3)
-                        final_image_.append(final_image[:, :, ::-1])
+                        if "k400" in self.cfg.training_type:
+                            final_image_.append(final_image)
+                        else:
+                            final_image_.append(final_image[:, :, ::-1])
 
                     # save final image with epoch and batch index
                     train_ = "train" if self.training else "val"
