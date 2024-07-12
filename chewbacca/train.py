@@ -88,12 +88,13 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
         from transformers.models.llama.modeling_llama import LlamaDecoderLayer
         from lightning.pytorch.strategies import DeepSpeedStrategy, FSDPStrategy
+        from timm.models.vision_transformer import (Attention, Block, LayerScale, PatchEmbed)
         log.info("Using FSDP! only supported for llama for now")
-        auto_wrap_policy = partial(transformer_auto_wrap_policy, transformer_layer_cls={LlamaDecoderLayer})
+        auto_wrap_policy = partial(transformer_auto_wrap_policy, transformer_layer_cls={Block})
         if "orig" in cfg.configs.training_type:
-            strategy = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing=LlamaDecoderLayer, limit_all_gathers=True, use_orig_params=True)
+            strategy = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing=Block, limit_all_gathers=True, use_orig_params=True)
         else:
-            strategy = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing=LlamaDecoderLayer, limit_all_gathers=True)
+            strategy = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing=Block, limit_all_gathers=True)
         del cfg.trainer.strategy
         del cfg.trainer._target_
         del cfg.trainer.accelerator
