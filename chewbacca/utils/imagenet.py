@@ -41,6 +41,7 @@ save_path = "data/imagenet_val_label.npy"
 train = False
 class_labels = joblib.load("data/class_labels_in1k.pkl")
 
+root_path = sys.argv[2] # /datasets01/imagenet_full_size/061417/train
 folders = os.listdir(root_path)
 frames = []
 labels = []
