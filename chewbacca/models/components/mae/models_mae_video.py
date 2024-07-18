@@ -313,15 +313,7 @@ class MaskedAutoencoderViT(nn.Module):
             # render the rest of the images
             for j in range(1, means.shape[1]//self.num_points):
                 means_delta = means[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]/10.0
-                means_delta[:, -1] *= 0
-                # TODO: only do x,y
-                # TODO: l1,l2 regualization to deltas
-                # TODO: add d-ssim loss
-                # TODO: get color avg from all frames.
-                # TODO: add a contraint for color, opacity and scale
-
-                # TODO: gaussian tokizer, 3d masking and next depth prediction
-                # TODO: masking
+                means_delta[:, -1] *= 0.01
                 # scales_delta = scales[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
                 # quats_delta = quats[i].contiguous().view(-1, 4)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
                 means_ = means_ + means_delta
