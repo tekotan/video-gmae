@@ -2,6 +2,7 @@ import math
 import os
 from typing import Any, Optional, Tuple
 
+import cv2
 import joblib
 import numpy as np
 import torch
@@ -11,27 +12,22 @@ import torch.optim as optim
 import transformers
 import xformers.ops as xops
 from einops import rearrange
+from lart.models.components.tokeizers.tokenizer import Tokenizer
 from lightning import LightningModule
+from moviepy.editor import ImageSequenceClip
 from omegaconf import DictConfig
+from timm.data.mixup import Mixup
+from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from torch import nn
-from torchmetrics import MeanMetric
+from torchmetrics import MeanMetric, MeanSquaredError
 from torchmetrics.aggregation import CatMetric
 from torchmetrics.classification.accuracy import Accuracy
-from transformers import LlamaForCausalLM
-from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
-from moviepy.editor import ImageSequenceClip
-from lart.models.components.tokeizers.tokenizer import Tokenizer
-from torchmetrics import MeanMetric, MeanSquaredError
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.psnr import PeakSignalNoiseRatio
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
-from torch.cuda.amp import autocast, GradScaler
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
-from timm.data.mixup import Mixup
 
 from chewbacca.utils import get_pylogger
-import cv2
+from chewbacca.utils.lamb import LARS, Lamb
 
 log = get_pylogger(__name__)
 
@@ -49,90 +45,6 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
     return [
         {'params': no_decay, 'weight_decay': 0.},
         {'params': decay, 'weight_decay': weight_decay}]
-
-class NativeScalerWithGradNormCount:
-    state_dict_key = "amp_scaler"
-
-    def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
-
-    def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
-        self._scaler.scale(loss).backward(create_graph=create_graph)
-        if update_grad:
-            if clip_grad is not None:
-                assert parameters is not None
-                self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-                norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
-            else:
-                self._scaler.unscale_(optimizer)
-                norm = get_grad_norm_(parameters)
-            self._scaler.step(optimizer)
-            self._scaler.update()
-        else:
-            norm = None
-        return norm
-
-    def state_dict(self):
-        return self._scaler.state_dict()
-
-    def load_state_dict(self, state_dict):
-        self._scaler.load_state_dict(state_dict)
-
-
-def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
-    if isinstance(parameters, torch.Tensor):
-        parameters = [parameters]
-    parameters = [p for p in parameters if p.grad is not None]
-    norm_type = float(norm_type)
-    if len(parameters) == 0:
-        return torch.tensor(0.)
-    device = parameters[0].grad.device
-    if norm_type == inf:
-        total_norm = max(p.grad.detach().abs().max().to(device) for p in parameters)
-    else:
-        total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), norm_type).to(device) for p in parameters]), norm_type)
-    return total_norm
-
-
-class LARS(torch.optim.Optimizer):
-    """
-    LARS optimizer, no rate scaling or weight decay for parameters <= 1D.
-    """
-    def __init__(self, params, lr=0, weight_decay=0, momentum=0.9, trust_coefficient=0.001):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum, trust_coefficient=trust_coefficient)
-        super().__init__(params, defaults)
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for g in self.param_groups:
-            for p in g['params']:
-                dp = p.grad
-
-                if dp is None:
-                    continue
-
-                if p.ndim > 1: # if not normalization gamma/beta or bias
-                    dp = dp.add(p, alpha=g['weight_decay'])
-                    param_norm = torch.norm(p)
-                    update_norm = torch.norm(dp)
-                    one = torch.ones_like(param_norm)
-                    q = torch.where(param_norm > 0.,
-                                    torch.where(update_norm > 0,
-                                    (g['trust_coefficient'] * param_norm / update_norm), one),
-                                    one)
-                    dp = dp.mul(q)
-
-                param_state = self.state[p]
-                if 'mu' not in param_state:
-                    param_state['mu'] = torch.zeros_like(p)
-                mu = param_state['mu']
-                mu.mul_(g['momentum']).add_(dp)
-                p.add_(mu, alpha=-g['lr'])
 
 
 def gpu_mem_usage():
@@ -161,15 +73,26 @@ class GMAELitModule(LightningModule):
         self.num_frames = self.cfg.seq_length if self.cfg.dataset_type=="video" else 1
 
         if self.cfg.dataset_type=="imagenet":
-            import chewbacca.models.components.mae.models_mae as models_mae
-            self.encoder = models_mae.__dict__[self.cfg.model_name](
-                                                                    norm_pix_loss=True,
-                                                                    img_size=self.cfg.input_size,
-                                                                    number_of_frames=self.num_frames,
-                                                                    num_gaussian=self.cfg.vocab_size,
-                                                                    scale_factor=self.cfg.scale_factor,
-                                                                    scale_vocab=self.cfg.scale_vocab,
-                                                                )
+            if "mae" in self.cfg.training_type:
+                import chewbacca.models.components.mae.models_mae as models_mae
+                self.encoder = models_mae.__dict__[self.cfg.model_name](
+                                                                        norm_pix_loss=True,
+                                                                        img_size=self.cfg.input_size,
+                                                                        number_of_frames=self.num_frames,
+                                                                        num_gaussian=self.cfg.vocab_size,
+                                                                        scale_factor=self.cfg.scale_factor,
+                                                                        scale_vocab=self.cfg.scale_vocab,
+                                                                    )
+            if "vit" in self.cfg.training_type:
+                import chewbacca.models.components.mae.models_vit as models_vit
+                self.encoder = models_vit.__dict__[self.cfg.model_name](
+                                                                        global_pool="avg",
+                                                                        img_size = self.cfg.input_size,
+                                                                        class_token=True,
+                                                                        num_classes=self.cfg.num_classes,
+                                                                        drop_path_rate=self.cfg.drop_path,
+                                                                    )
+                
         else:
             import chewbacca.models.components.mae.models_mae_video as models_mae
             self.encoder = models_mae.__dict__[self.cfg.model_name](
@@ -180,10 +103,11 @@ class GMAELitModule(LightningModule):
                                                                     scale_factor=self.cfg.scale_factor,
                                                                     scale_vocab=self.cfg.scale_vocab,
                                                                 )
-        num_hidden_layers = self.encoder.num_layers
-        hsize = self.encoder.embed_dim
+            
+        
+        num_hidden_layers = len(self.encoder.blocks)
+        hsize = self.encoder.patch_embed.proj.weight.shape[0]
 
-        # self.linear_layer = nn.ModuleList([nn.Linear(hsize, self.cfg.num_classes) for i in range(num_hidden_layers)])
         self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
 
         # setup meters
@@ -204,11 +128,7 @@ class GMAELitModule(LightningModule):
         os.makedirs(self.cfg.storage_folder + "/videos/", exist_ok=True)
         log.info("Storage folder : " + self.cfg.storage_folder)
 
-        # # turnoff automatic optimization
-        # self.automatic_optimization = False
-        # self.scaler = GradScaler(enabled = True)
-
-        if(self.cfg.solver=="LARS"):
+        if(self.cfg.solver=="LARS" or self.cfg.solver=="LAMB"):
             # freeze all layers except fc
             for _, p in self.encoder.named_parameters():
                 p.requires_grad = False
@@ -279,11 +199,11 @@ class GMAELitModule(LightningModule):
             extras_    = {}
             logits_    = {}
 
-            if "mae" in self.cfg.training_type:
-                latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(image, mask_ratio=0.75)
-                pred = self.encoder.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-                loss = self.encoder.forward_loss(image, pred, mask)
-                loss_dict  = {"loss": loss}
+            # if "mae" in self.cfg.training_type:
+            #     latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(image, mask_ratio=0.75)
+            #     pred = self.encoder.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
+            #     loss = self.encoder.forward_loss(image, pred, mask)
+            #     loss_dict  = {"loss": loss}
 
             if "vit" in self.cfg.training_type:
                 if self.mixup_fn is not None and self.training:
@@ -291,9 +211,9 @@ class GMAELitModule(LightningModule):
 
                 latent_layers = self.encoder.forward_features(image)
                 loss_dict = {"loss": torch.tensor(0).to(device=device).to(dtype=dtype)}
-                for i in range(self.encoder.num_layers):
+                for i in range(len(self.encoder.blocks)):
                     cls_token = latent_layers
-                    if "full-finetuning" in self.cfg.training_type  and i==self.encoder.num_layers-1:
+                    if "full-finetuning" in self.cfg.training_type  and i==len(self.encoder.blocks)-1:
                         logits__ = self.linear_layer[i](cls_token)
                     else:
                         logits__ = self.linear_layer[i](cls_token.detach())
@@ -503,8 +423,6 @@ class GMAELitModule(LightningModule):
 
     def on_train_epoch_start(self) -> None:
         torch.cuda.empty_cache()
-        if "schedulefree" in self.cfg.training_type:
-            self.optimizers().train()
 
     def training_step(self, batch: Any, batch_idx: int):
 
@@ -537,8 +455,6 @@ class GMAELitModule(LightningModule):
 
     def on_validation_epoch_start(self) -> None:
         torch.cuda.empty_cache()
-        if "schedulefree" in self.cfg.training_type:
-            self.optimizers().eval()
 
     def validation_step(self, batch: Any, batch_idx: int):
 
@@ -691,6 +607,9 @@ class GMAELitModule(LightningModule):
         if(self.cfg.solver=="LARS"):
             optim_params = [{'params': filter(lambda p: p.requires_grad, self.linear_layer.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
             optimizer = LARS(params=optim_params, weight_decay=self.cfg.weight_decay)
+        elif(self.cfg.solver=="LAMB"):
+            optim_params = [{'params': filter(lambda p: p.requires_grad, self.linear_layer.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
+            optimizer = Lamb(params=optim_params, weight_decay=self.cfg.weight_decay)
         elif(self.cfg.solver=="AdamW"):
             optim_params = add_weight_decay(self.trainer.model, self.cfg.weight_decay)
             optimizer = optim.AdamW(params=optim_params, lr=self.cfg.lr * self.lr_scaler, betas=(0.9, 0.95))
