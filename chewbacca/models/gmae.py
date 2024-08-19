@@ -248,7 +248,7 @@ class GMAELitModule(LightningModule):
                         loss_dict[f"loss_{j}"] = loss_ / (self.cfg.vocab_size - j)
 
                 # save the masked images and reconstructed images
-                if "save-images" in self.cfg.training_type and batch_idx<1:
+                if "save-images" in self.cfg.training_type and batch_idx<1000000:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(image, mask_ratio=0.0)
 
@@ -280,13 +280,13 @@ class GMAELitModule(LightningModule):
                     # get points on xy density map
                     _, xys = self.encoder.forward_decoder(latent, ids_restore, return_gaussians=True, limit_gaussian_z=-1)
                     plane_ = torch.zeros(len(xys), self.cfg.input_size, self.cfg.input_size, 3).to(device=device).to(dtype=dtype)
-                    try:
-                        for i in range(len(xys)):
-                            for j in range(len(xys[i][0])):
-                                if xys[i][1][j]>0:
-                                    plane_[i, int(xys[i][0][j][1]), int(xys[i][0][j][0])] = 1
-                    except:
-                        pass
+                    # try:
+                    #     for i in range(len(xys)):
+                    #         for j in range(len(xys[i][0])):
+                    #             if xys[i][1][j]>0:
+                    #                 plane_[i, int(xys[i][0][j][1]), int(xys[i][0][j][0])] = 1
+                    # except:
+                    #     pass
                     plane_ = (plane_.detach().cpu().numpy() * 255).astype(np.uint8)
 
                     # get depth maps
@@ -301,6 +301,7 @@ class GMAELitModule(LightningModule):
                     global_rank = self.trainer.global_rank
                     if global_rank==0:
                         cv2.imwrite(self.cfg.storage_folder + f"/results/{train_}_{self.current_epoch}_{batch_idx}.png", final_image)
+                        joblib.dump(xys, self.cfg.storage_folder + f"/results/{train_}_{self.current_epoch}_{batch_idx}.pkl")
 
 
             # for linear probe

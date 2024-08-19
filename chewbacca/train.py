@@ -159,7 +159,12 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
 
                     if "remove-probe-layers" in cfg.configs.training_type:
                         av = {k: v for k, v in av.items() if "linear_layer" not in k}
-                    
+
+                    if "interpolate-pos-emb" in cfg.configs.training_type:
+                        from chewbacca.models.components.mae.models_mae import interpolate_pos_embed, interpolate_pos_embed2
+                        av['encoder.pos_embed'] = interpolate_pos_embed(model.encoder, av)
+                        av['encoder.decoder_pos_embed'] = interpolate_pos_embed2(model.encoder, av)
+
                     out = model.load_state_dict(av, strict=cfg.configs.load_strict)
                     log.info(out)
                     log.info("Loading weights from weights " + cfg.configs.weights_path)
