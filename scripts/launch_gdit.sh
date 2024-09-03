@@ -1,7 +1,7 @@
 # #!/bin/bash
 
 
-python chewbacca/train.py -m \
+/home/ubuntu/llm-us-west-2/envs/chewbacca/bin/python chewbacca/train.py -m \
 --config-name gmae.yaml \
 model._target_="chewbacca.models.gdit.GDITLitModule" \
 datamodule._target_="chewbacca.datamodules.image_datamodule.ImageDataModule" \
@@ -13,7 +13,7 @@ trainer.num_nodes=1 \
 configs.task="pretrain" \
 configs.model_name="dit-a" \
 configs.input_size=224 \
-configs.dataset_type="imagenet" \
+configs.dataset_type="cifar100" \
 configs.weight_decay=5e-2 \
 trainer.accumulate_grad_batches=1 \
 configs.train_batch_size=16 \
@@ -25,7 +25,7 @@ configs.warmup_steps=10 \
 trainer.max_epochs=400 \
 configs.scheduler="cosine_step" \
 configs.lr_interval="step" \
-configs.num_classes=1000 \
+configs.num_classes=100 \
 configs.load_strict=False \
 callbacks.model_checkpoint.every_n_epochs=10 \
 configs.training_type="save-images_overfit" \

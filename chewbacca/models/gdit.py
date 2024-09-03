@@ -102,7 +102,7 @@ class GDITLitModule(LightningModule):
 
         self.num_frames = self.cfg.seq_length if self.cfg.dataset_type=="video" else 1
 
-        if self.cfg.dataset_type=="imagenet":
+        if self.cfg.dataset_type=="imagenet" or self.cfg.dataset_type=="cifar100":
             embed_dim = 256
             self.patch_emb = PatchEmbed(self.cfg.input_size, self.cfg.patch_size, 3, embed_dim)
             self.patch_emb2 = PatchEmbed(self.cfg.input_size, self.cfg.patch_size, 3, embed_dim)

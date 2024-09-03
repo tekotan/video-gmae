@@ -74,6 +74,19 @@ class ImageDataModule(LightningDataModule):
                 if(self.hparams.train):
                     self.data_train = build_imagenet_dataset(True, self.hparams.cfg)
                 self.data_val = build_imagenet_dataset(False, self.hparams.cfg)
+            elif self.hparams.cfg.dataset_type == "cifar100":
+                from torchvision.datasets import CIFAR100
+                from torchvision import transforms
+
+                transform = transforms.Compose([
+                    transforms.Resize((self.hparams.cfg.input_size, self.hparams.cfg.input_size)),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+                ])
+
+                if self.hparams.train:
+                    self.data_train = CIFAR100(root='./data', train=True, download=True, transform=transform)
+                self.data_val = CIFAR100(root='./data', train=False, download=True, transform=transform)
                 
     def train_dataloader(self):
         
