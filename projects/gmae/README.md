@@ -42,6 +42,7 @@ pip install deepspeed
 pip install Ninja # for gsplat, and deepspeed
 pip install hydra-submitit-launcher
 pip install git+https://github.com/nerfstudio-project/gsplat.git@v0.1.0
+pip install git+https://github.com/brjathu/LART
 pip install torchmetrics[image]
 pip install diffusers
 pip install -e .
