@@ -249,6 +249,8 @@ configs:
     scale_factor: 1.0
     scale_vocab: 1.0
 
+    deltas_reg_weight: 0.0
+
     drop_path: 0.0
     preload: 0
     chunk_size: 1024

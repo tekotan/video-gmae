@@ -34,9 +34,14 @@ class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3,
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, number_of_frames=2, scale_factor=1.0, scale_vocab=1.0):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, 
+                 number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
+                 deltas_reg_weight=0.0):
         super().__init__()
-
+        # --------------------------------------------------------------------------
+        # MAE encoder specifics
+        self.deltas_reg_weight = deltas_reg_weight
+        # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
@@ -206,7 +211,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x, mask, ids_restore, latents
 
-    def forward_decoder(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1):
+    def forward_decoder(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False):
 
         if limit_gaussian > 0:
             limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
@@ -314,11 +319,11 @@ class MaskedAutoencoderViT(nn.Module):
             for j in range(1, means.shape[1]//self.num_points):
                 means_delta = means[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]/10.0
                 means_delta[:, -1] *= 0.01
-                # scales_delta = scales[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
-                # quats_delta = quats[i].contiguous().view(-1, 4)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
+                scales_delta = scales[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
+                quats_delta = quats[i].contiguous().view(-1, 4)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
                 means_ = means_ + means_delta
-                # scales_ = scales_.float()
-                # quats_ = quats_.float()
+                scales_ = scales_.float() + scales_delta
+                quats_ = quats_.float() + quats_delta
                 xys, depths, radii, conics, num_tiles_hit, cov3d = ProjectGaussians.apply(means_, scales_, 1, quats_, self.viewmat, self.viewmat, self.focal, self.focal, self.W / 2, self.H / 2, self.H, self.W, self.tile_bounds,)
                 # rgbs_ = rgbs[i].contiguous().view(-1, 3).float()
                 # opacities_ = opacities[i].contiguous().view(-1, 1).float()
@@ -336,7 +341,7 @@ class MaskedAutoencoderViT(nn.Module):
 
                     out_img = RasterizeGaussians.apply(xys, depths, radii, conics, num_tiles_hit, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.H, self.W,)
                 except:
-                    out_img = torch.zeros(3, self.H, self.W).to(dtype=dtype).to(device=device)
+                    out_img = torch.zeros(self.H, self.W, 3).to(dtype=dtype).to(device=device)
                 # out_img = out_img.half()
                 # imgs_.append(out_img)
                 images_per_video.append(out_img)
@@ -346,11 +351,15 @@ class MaskedAutoencoderViT(nn.Module):
 
         if return_gaussians:
             return 0, xys_
-
+        if return_deltas:
+            mean_deltas = means.contiguous().view(means.shape[0], -1, 3)[self.num_points:][:limit_gaussian]/10.0
+            scales_delta = scales[i].contiguous().view(-1, 3)[self.num_points:][:limit_gaussian]
+            quats_delta = quats[i].contiguous().view(-1, 4)[self.num_points:][:limit_gaussian]
+            return imgs_, (mean_deltas, scales_delta, quats_delta)
         return imgs_
 
 
-    def forward_loss(self, imgs, pred, mask, additional_data=None):
+    def forward_loss(self, imgs, pred, mask, additional_data=None, deltas=None):
         """
         imgs: [N, 3, H, W]
         pred: [N, L, p*p*3]
@@ -369,6 +378,11 @@ class MaskedAutoencoderViT(nn.Module):
             if(torch.sum(pred[i])>0):
                 loss += torch.nn.functional.mse_loss(imgs_[i][:, :self.number_of_frames], pred[i].permute(3, 0, 1, 2))
                 count += 1
+        if self.deltas_reg_weight > 0:
+            means, scales, quats = deltas
+            loss += torch.linalg.norm(means) * self.deltas_reg_weight
+            loss += torch.linalg.norm(scales) * self.deltas_reg_weight
+            loss += torch.linalg.norm(quats) * self.deltas_reg_weight
 
         return loss
 
@@ -380,8 +394,10 @@ class MaskedAutoencoderViT(nn.Module):
         """
 
         latent, mask, ids_restore, latents_layer = self.forward_encoder(imgs, mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        loss = self.forward_loss(imgs, pred, mask, additional_data)
+        deltas = None
+        if self.deltas_reg_weight > 0:
+            pred, deltas = self.forward_decoder(latent, ids_restore, return_deltas=True)  # [N, L, p*p*3] 
+        loss = self.forward_loss(imgs, pred, mask, additional_data, deltas)
         # if(self.use_gaussian):
         return loss, pred, mask, latent, latents_layer
 

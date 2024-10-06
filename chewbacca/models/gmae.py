@@ -12,7 +12,7 @@ import torch.optim as optim
 import transformers
 import xformers.ops as xops
 from einops import rearrange
-from lart.models.components.tokeizers.tokenizer import Tokenizer
+# from lart.models.components.tokeizers.tokenizer import Tokenizer
 from lightning import LightningModule
 from moviepy.editor import ImageSequenceClip
 from omegaconf import DictConfig
@@ -102,6 +102,7 @@ class GMAELitModule(LightningModule):
                                                                     num_gaussian=self.cfg.vocab_size,
                                                                     scale_factor=self.cfg.scale_factor,
                                                                     scale_vocab=self.cfg.scale_vocab,
+                                                                    deltas_reg_weight=self.cfg.deltas_reg_weight
                                                                 )
             
         
