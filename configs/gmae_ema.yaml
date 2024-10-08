@@ -250,6 +250,7 @@ configs:
     scale_vocab: 1.0
 
     deltas_reg_weight: 0.0
+    random_frames: False
 
     drop_path: 0.0
     preload: 0

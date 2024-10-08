@@ -36,23 +36,26 @@ class MaskedAutoencoderViT(nn.Module):
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, 
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
-                 deltas_reg_weight=0.0):
+                 deltas_reg_weight=0.0, random_frames=False):
         super().__init__()
         # --------------------------------------------------------------------------
-        # MAE encoder specifics
+        # V1 Upgrades
         self.deltas_reg_weight = deltas_reg_weight
+        self.random_frames = random_frames
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
-        self.number_of_frames = number_of_frames
+        self.number_of_frames = number_of_frames if not self.random_frames else 2
+        self.total_frames = number_of_frames
+        
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
         self.scale_factor = scale_factor
         self.scale_vocab = int(scale_vocab)
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.number_of_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
         self.blocks = nn.ModuleList([
                 Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
@@ -70,7 +73,9 @@ class MaskedAutoencoderViT(nn.Module):
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
-        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.number_of_frames, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        self.frame_pos_embed = nn.Parameter(torch.zeros(1, self.total_frames, decoder_embed_dim))
+
+        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
@@ -106,11 +111,14 @@ class MaskedAutoencoderViT(nn.Module):
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.number_of_frames, cls_token=False)
+        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-        decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.number_of_frames, cls_token=False)
+        decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
         self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
+
+        frame_pos_embed = get_3d_sincos_pos_embed(self.frame_pos_embed.shape[-1], 1, self.total_frames, cls_token=False)
+        self.frame_pos_embed.data.copy_(torch.from_numpy(frame_pos_embed).float().unsqueeze(0))
 
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
         w = self.patch_embed.proj.weight.data
@@ -193,7 +201,7 @@ class MaskedAutoencoderViT(nn.Module):
         x_ = []
         for a in range(x.shape[2]):
             x_.append(self.patch_embed(x[:, :, a, :, :]))
-        x_ = torch.stack(x_, dim=1)[:, :self.number_of_frames]
+        x_ = torch.stack(x_, dim=1)[:, :self.total_frames]
         x_ = rearrange(x_, 'n t c d -> n (t c) d')
 
         # add pos embed w/o cls token
@@ -210,9 +218,21 @@ class MaskedAutoencoderViT(nn.Module):
         x = self.norm(x)
 
         return x, mask, ids_restore, latents
+    def decoder_step(self, x, mask_tokens, frame_token=None):
+        if self.random_frames:
+            assert frame_token is not None, "Need to provide frame number to use the random_frames functionality"
+            x_ = torch.cat([x, frame_token, mask_tokens], dim=1)  # no cls token
+        else:
+            x_ = torch.cat([x, mask_tokens], dim=1)  # no cls token
+        # apply Transformer blocks
+        for blk in self.decoder_blocks:
+            x_ = blk(x_)
+        x_ = self.decoder_norm(x_)
+        x_points = self.linear_gaussian(x_[:, -self.number_of_frames*self.num_points:])
 
-    def forward_decoder(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False):
+        return x_points
 
+    def forward_decoder(self, x, ids_restore, limit_gaussian=-1, frame_num=None):
         if limit_gaussian > 0:
             limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
         else:
@@ -225,17 +245,27 @@ class MaskedAutoencoderViT(nn.Module):
         p_ = torch.gather(self.decoder_pos_embed[:, :, :].repeat(x_.shape[0], 1, 1), dim=1, index=ids_shuffle.unsqueeze(-1).repeat(1, 1, self.decoder_pos_embed.shape[2]))  # unshuffle
         x_ = x_ + p_
         mask_tokens = self.mask_token.repeat(x_.shape[0], self.num_points*self.number_of_frames, 1) + self.decoder_pos_embed_gaussian
+        if self.random_frames:
+            random_frame = torch.randint(low=1, high=self.total_frames, size=()) if not frame_num else frame_num
+            frame_token = self.frame_pos_embed[:, random_frame:random_frame+1, :].repeat(x_.shape[0], 1, 1)
+            x_points = self.decoder_step(x_, mask_tokens, frame_token=frame_token)                
+        else:
+            x_points = self.decoder_step(x_, mask_tokens, frame_token=None)
 
-        x_ = torch.cat([x_, mask_tokens], dim=1)  # no cls token
-        # apply Transformer blocks
-        for blk in self.decoder_blocks:
-            x_ = blk(x_)
-        x_ = self.decoder_norm(x_)
-        x_points = self.linear_gaussian(x_[:, -self.number_of_frames*self.num_points:])
         if self.scale_vocab > 1:
-            x_points = x_points.reshape(x_points.shape[0], self.number_of_frames, self.num_points, self.scale_vocab, 14)
+            reshape_frames = self.number_of_frames
+            x_points = x_points.reshape(x_points.shape[0], reshape_frames, self.num_points, self.scale_vocab, 14)
             x_points = x_points.permute(0, 1, 3, 2, 4)
-            x_points = x_points.reshape(x_points.shape[0], self.number_of_frames * self.scale_vocab * self.num_points, 14)
+            x_points = x_points.reshape(x_points.shape[0], reshape_frames * self.scale_vocab * self.num_points, 14)
+        if self.random_frames and not frame_num:
+            return x_points, random_frame
+        return x_points
+    
+    def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False):
+        if limit_gaussian > 0:
+            limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
+        else:
+            limit_gaussian = int(self.num_points * self.scale_vocab)
 
         device = x_points.device
         dtype = x_points.dtype
@@ -260,7 +290,11 @@ class MaskedAutoencoderViT(nn.Module):
         self.viewmat = self.viewmat.to(dtype=dtype).to(device=device)
         imgs_ = []
         xys_ = []
+        out_img_1 = torch.zeros(3, self.H, self.W).to(dtype=dtype).to(device=device)
+        out_img_2 = out_img_1.permute(1,2,0)
         for i in range(means.shape[0]):
+            torch.cuda.empty_cache()
+            
             images_per_video = []
             # render first image
             means_ = means[i].contiguous().view(-1, 3)[:limit_gaussian]
@@ -310,13 +344,14 @@ class MaskedAutoencoderViT(nn.Module):
                 out_img = RasterizeGaussians.apply(xys, depths, radii, conics, num_tiles_hit, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.H, self.W,)
 
             except:
-                out_img = torch.zeros(3, self.H, self.W).to(dtype=dtype).to(device=device)
+                out_img = out_img_1
             # out_img = out_img.half()
             # imgs_.append(out_img)
             images_per_video.append(out_img)
 
             # render the rest of the images
             for j in range(1, means.shape[1]//self.num_points):
+                torch.cuda.empty_cache()
                 means_delta = means[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]/10.0
                 means_delta[:, -1] *= 0.01
                 scales_delta = scales[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
@@ -341,7 +376,7 @@ class MaskedAutoencoderViT(nn.Module):
 
                     out_img = RasterizeGaussians.apply(xys, depths, radii, conics, num_tiles_hit, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.H, self.W,)
                 except:
-                    out_img = torch.zeros(self.H, self.W, 3).to(dtype=dtype).to(device=device)
+                    out_img = out_img_2
                 # out_img = out_img.half()
                 # imgs_.append(out_img)
                 images_per_video.append(out_img)
@@ -356,10 +391,30 @@ class MaskedAutoencoderViT(nn.Module):
             scales_delta = scales[i].contiguous().view(-1, 3)[self.num_points:][:limit_gaussian]
             quats_delta = quats[i].contiguous().view(-1, 4)[self.num_points:][:limit_gaussian]
             return imgs_, (mean_deltas, scales_delta, quats_delta)
+        
+        return imgs_
+        
+    def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1):
+        init_imgs = []
+        next_imgs = []
+        for i in range(1, self.total_frames):
+            torch.cuda.empty_cache()
+            with torch.no_grad():
+                x_points = self.forward_decoder(x, ids_restore, limit_gaussian=limit_gaussian, frame_num=i)
+                imgs_ = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z).cpu()
+                init_imgs.append(imgs_[:, 0:1])
+                next_imgs.append(imgs_[:, 1:2])
+
+        init_imgs = torch.cat(init_imgs, axis=1).mean(axis=1, keepdim=True)
+        next_imgs = torch.cat(next_imgs, axis=1)
+        imgs_ = torch.cat([init_imgs, next_imgs], axis=1)
+
+        del init_imgs
+        del next_imgs
+
         return imgs_
 
-
-    def forward_loss(self, imgs, pred, mask, additional_data=None, deltas=None):
+    def forward_loss(self, imgs, pred, mask, additional_data=None, deltas=None, frame_num=None):
         """
         imgs: [N, 3, H, W]
         pred: [N, L, p*p*3]
@@ -372,12 +427,14 @@ class MaskedAutoencoderViT(nn.Module):
         imgs_ = (imgs * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
 
         loss = 0
-        count = 0
 
         for i in range(imgs_.shape[0]):
             if(torch.sum(pred[i])>0):
-                loss += torch.nn.functional.mse_loss(imgs_[i][:, :self.number_of_frames], pred[i].permute(3, 0, 1, 2))
-                count += 1
+                if frame_num is not None:
+                    loss += torch.nn.functional.mse_loss(torch.cat([imgs_[i][:, 0:1], imgs_[i][:, frame_num:frame_num+1]], axis=1), 
+                                                        pred[i].permute(3, 0, 1, 2))
+                else:
+                    loss += torch.nn.functional.mse_loss(imgs_[i][:, :self.number_of_frames], pred[i].permute(3, 0, 1, 2))
         if self.deltas_reg_weight > 0:
             means, scales, quats = deltas
             loss += torch.linalg.norm(means) * self.deltas_reg_weight
@@ -386,18 +443,22 @@ class MaskedAutoencoderViT(nn.Module):
 
         return loss
 
-
-    def forward(self, imgs, mask_ratio=0.75, additional_data=None):
+    def forward(self, imgs, mask_ratio=0.75, additional_data=None, all_frames=False):
         """
         imgs: [N, 3, t, H, W]
         mask_ratio: masking ratio
         """
 
         latent, mask, ids_restore, latents_layer = self.forward_encoder(imgs, mask_ratio)
-        deltas = None
-        if self.deltas_reg_weight > 0:
-            pred, deltas = self.forward_decoder(latent, ids_restore, return_deltas=True)  # [N, L, p*p*3] 
-        loss = self.forward_loss(imgs, pred, mask, additional_data, deltas)
+        if self.random_frames:
+            x_points, random_frame = self.forward_decoder(latent, ids_restore, all_frames=all_frames)
+            pred, deltas = self.forward_render(x_points, return_deltas=True)
+            loss = self.forward_loss(imgs, pred, mask, additional_data, deltas, frame_num=random_frame)
+        else:
+            x_points, random_frame = self.forward_decoder(latent, ids_restore)
+            pred, deltas = self.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
+            loss = self.forward_loss(imgs, pred, mask, additional_data, deltas)
+        
         # if(self.use_gaussian):
         return loss, pred, mask, latent, latents_layer
 
