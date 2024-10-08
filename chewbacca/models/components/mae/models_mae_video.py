@@ -354,11 +354,11 @@ class MaskedAutoencoderViT(nn.Module):
                 torch.cuda.empty_cache()
                 means_delta = means[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]/10.0
                 means_delta[:, -1] *= 0.01
-                scales_delta = scales[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
-                quats_delta = quats[i].contiguous().view(-1, 4)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
+                # scales_delta = scales[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
+                # quats_delta = quats[i].contiguous().view(-1, 4)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
                 means_ = means_ + means_delta
-                scales_ = scales_.float() + scales_delta
-                quats_ = quats_.float() + quats_delta
+                # scales_ = scales_.float() + scales_delta
+                # quats_ = quats_.float() + quats_delta
                 xys, depths, radii, conics, num_tiles_hit, cov3d = ProjectGaussians.apply(means_, scales_, 1, quats_, self.viewmat, self.viewmat, self.focal, self.focal, self.W / 2, self.H / 2, self.H, self.W, self.tile_bounds,)
                 # rgbs_ = rgbs[i].contiguous().view(-1, 3).float()
                 # opacities_ = opacities[i].contiguous().view(-1, 1).float()
