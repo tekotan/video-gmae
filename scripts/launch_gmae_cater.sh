@@ -3,9 +3,9 @@ python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
 model._target_="chewbacca.models.gmae.GMAELitModule" \
 datamodule._target_="chewbacca.datamodules.video_datamodule.VideoDataModule" \
-task_name=vit_base_cater_v1_test4 \
+task_name=vit_base_cater_v1_test6 \
 trainer=ddp_unused \
-trainer.devices=8 \
+trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="pretrain" \
 configs.model_name="mae_vit_base_patch16" \
@@ -23,7 +23,8 @@ configs.lr_interval="step" \
 configs.warmup_steps=20 \
 trainer.max_epochs=400 \
 configs.seq_length=16 \
-configs.deltas_reg_weight=0.1 \
+configs.deltas_reg_weight=0.00 \
+configs.vocab_size=256 \
 configs.random_frames=True \
 configs.sample_rate=1 \
 configs.num_classes=200 \

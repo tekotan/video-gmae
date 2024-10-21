@@ -372,8 +372,6 @@ class GMAELitModule(LightningModule):
                 if "save-images" in self.cfg.training_type and batch_idx<1:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
-                        del mask
-                        torch.cuda.empty_cache()
                         if not self.cfg.random_frames:
                             x_points = self.encoder.forward_decoder(latent, ids_restore)
                     # renormalize to 0,1
@@ -389,7 +387,6 @@ class GMAELitModule(LightningModule):
                                 pred_ = self.encoder.forward_render(x_points, limit_gaussian_z=j)
                             else:
                                 pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j)
-                            torch.cuda.empty_cache()
                             preds_all.append(pred_)
                         preds_2 = torch.stack(preds_all, dim=0)
                         pred_ab = []

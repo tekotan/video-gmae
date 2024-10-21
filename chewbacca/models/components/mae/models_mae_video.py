@@ -18,8 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.special
 from einops import rearrange
-from gsplat.project_gaussians import ProjectGaussians
-from gsplat.rasterize import RasterizeGaussians
+# from gsplat.project_gaussians import ProjectGaussians
+# from gsplat.rasterize import RasterizeGaussians
 from timm.layers import DropPath, Mlp, PatchEmbed
 from timm.models.vision_transformer import (Attention, Block, LayerScale,
                                             PatchEmbed)
@@ -27,6 +27,14 @@ from timm.models.vision_transformer import (Attention, Block, LayerScale,
 from lart.models.components.mae.pos_embed import (get_2d_sincos_pos_embed,
                                                   get_3d_sincos_pos_embed)
 
+from gsplat.cuda._wrapper import (
+    fully_fused_projection,
+    isect_offset_encode,
+    isect_tiles,
+    rasterize_to_pixels,
+)
+
+from gsplat import rasterization
 
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
@@ -86,27 +94,29 @@ class MaskedAutoencoderViT(nn.Module):
         self.norm_pix_loss = norm_pix_loss
 
         self.num_points = num_gaussian #1000
-        self.BLOCK_X, self.BLOCK_Y = 16, 16
+        self.tile_size = 16
         self.fov_x = torch.pi / 2.0
         self.H, self.W = img_size, img_size
         self.focal = 0.5 * float(self.W) / math.tan(0.5 * self.fov_x)
-        self.tile_bounds = (
-                    (self.W + self.BLOCK_X - 1) // self.BLOCK_X,
-                    (self.H + self.BLOCK_Y - 1) // self.BLOCK_Y,
-                    1,
-                )
-        self.block = torch.tensor([self.BLOCK_X, self.BLOCK_Y, 1])
+        self.Ks = torch.tensor(
+            [[
+                [self.focal, 0, self.W/2],
+                [0.0, self.W/self.H * self.focal, self.H/2],
+                [0.0, 0.0, 1.0],
+            ], ],)
+        self.block = torch.tensor([self.tile_size, self.tile_size, 1])
         self.viewmat = torch.tensor(
-            [
+            [[
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 1.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0, 8.0],
                 [0.0, 0.0, 0.0, 1.0],
-            ],)
+            ], ],)
         self.decoder_pos_embed_gaussian = nn.Parameter(torch.rand(1, self.num_points*self.number_of_frames, decoder_embed_dim), requires_grad=True)  # learnable parameters
         self.linear_gaussian = nn.Linear(decoder_embed_dim, int(14 * self.scale_vocab), bias=False)
 
         self.initialize_weights()
+
 
     def initialize_weights(self):
         # initialization
@@ -276,111 +286,122 @@ class MaskedAutoencoderViT(nn.Module):
         au = quats[:, :, :1]
         av = quats[:, :, 1:2]
         aw = quats[:, :, 2:3]
-        quats = torch.stack([
+
+        quats = torch.cat([
             torch.sqrt(1.0 - au) * torch.sin(2.0 * torch.pi * av),
             torch.sqrt(1.0 - au) * torch.cos(2.0 * torch.pi * av),
             torch.sqrt(au) * torch.sin(2.0 * torch.pi * aw),
             torch.sqrt(au) * torch.cos(2.0 * torch.pi * aw),
         ], dim=-1)
-        quats = quats[:, :, 0, :]
 
-        rgbs = x_points[:, :, 10:13]
-        opacities = x_points[:, :, 13:14]
+        rgbs = torch.sigmoid(x_points[:, :, 10:13])
+        opacities = torch.sigmoid(x_points[:, :, 13:14])
+
 
         self.viewmat = self.viewmat.to(dtype=dtype).to(device=device)
+        self.Ks = self.Ks.to(dtype=dtype).to(device=device)
+
+
         imgs_ = []
         xys_ = []
-        out_img_1 = torch.zeros(3, self.H, self.W).to(dtype=dtype).to(device=device)
-        out_img_2 = out_img_1.permute(1,2,0)
         for i in range(means.shape[0]):
             torch.cuda.empty_cache()
-            
             images_per_video = []
             # render first image
-            means_ = means[i].contiguous().view(-1, 3)[:limit_gaussian]
-            scales_ = scales[i].contiguous().view(-1, 3)[:limit_gaussian]
-            quats_ = quats[i].contiguous().view(-1, 4)[:limit_gaussian]
-            means_ = means_.float()
-            scales_ = scales_.float()
-            quats_ = quats_.float()
-            self.viewmat = self.viewmat.float()
-            xys, depths, radii, conics, num_tiles_hit, cov3d = ProjectGaussians.apply(means_, scales_, 1, quats_, self.viewmat, self.viewmat, self.focal, self.focal, self.W / 2, self.H / 2, self.H, self.W, self.tile_bounds,)
+            means_ = means[i].contiguous()[:limit_gaussian]
+            scales_ = scales[i].contiguous()[:limit_gaussian]
+            quats_ = quats[i].contiguous()[:limit_gaussian]
+            opacities_ = opacities[i][:limit_gaussian].view(1, -1)
+            rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0)
 
-            rgbs_ = rgbs[i].view(-1, 3).float()[:limit_gaussian]
-            if return_depth:
-                depth_ = (depths[:limit_gaussian] - torch.min(depths)) / (torch.max(depths) - torch.min(depths))
-                # log scale
-                depth_ = torch.log(depth_)
-                rgbs_[:, 0] = depth_
-                rgbs_[:, 1] = depth_
-                rgbs_[:, 2] = depth_
+            # radii, xys, depths, conics, _ = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
+            
+            # if return_depth:
+            #     depth_ = (depths[:limit_gaussian] - torch.min(depths)) / (torch.max(depths) - torch.min(depths))
+            #     # log scale
+            #     depth_ = torch.log(depth_)
+            #     rgbs_[:, 0] = depth_
+            #     rgbs_[:, 1] = depth_
+            #     rgbs_[:, 2] = depth_
 
-            opacities_ = opacities[i].view(-1, 1).float()[:limit_gaussian]
-            try:
-                if limit_gaussian_z > 0:
-                    # sort over depths and take the first limit_gaussian_z
-                    _, indices = torch.sort(depths)
-                    xys = xys[indices[:limit_gaussian_z]]
-                    depths = depths[indices[:limit_gaussian_z]]
-                    radii = radii[indices[:limit_gaussian_z]]
-                    conics = conics[indices[:limit_gaussian_z]]
-                    rgbs_ = rgbs_[indices[:limit_gaussian_z]]
-                    opacities_ = opacities_[indices[:limit_gaussian_z]]
-                    num_tiles_hit = num_tiles_hit[indices[:limit_gaussian_z]]
+            # # try:
+            # if limit_gaussian_z > 0:
+            #     # sort over depths and take the first limit_gaussian_z
+            #     _, indices = torch.sort(depths[0])
+            #     xys = xys[:, indices[:limit_gaussian_z]]
+            #     depths = depths[:, indices[:limit_gaussian_z]]
+            #     radii = radii[:, indices[:limit_gaussian_z]]
+            #     conics = conics[:, indices[:limit_gaussian_z]]
+            #     rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
+            #     opacities_ = opacities_[:, indices[:limit_gaussian_z]]
 
-                if select_range_z > 0:
-                    _, indices = torch.sort(depths)
-                    start_ = select_range_z[0]
-                    end_ = select_range_z[1]
-                    xys = xys[indices[start_:end_]]
-                    depths = depths[indices[start_:end_]]
-                    radii = radii[indices[start_:end_]]
-                    conics = conics[indices[start_:end_]]
-                    rgbs_ = rgbs_[indices[start_:end_]]
-                    opacities_ = opacities_[indices[start_:end_]]
-                    num_tiles_hit = num_tiles_hit[indices[start_:end_]]
+            # if select_range_z > 0:
+            #     _, indices = torch.sort(depths[0])
+            #     start_ = select_range_z[0]
+            #     end_ = select_range_z[1]
+            #     xys = xys[:, indices[start_:end_]]
+            #     depths = depths[:, indices[start_:end_]]
+            #     radii = radii[:, indices[start_:end_]]
+            #     conics = conics[:, indices[start_:end_]]
+            #     rgbs_ = rgbs_[:, indices[start_:end_]]
+            #     opacities_ = opacities_[:, indices[start_:end_]]
 
-                xys_.append([xys, opacities_])
-                out_img = RasterizeGaussians.apply(xys, depths, radii, conics, num_tiles_hit, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.H, self.W,)
+            # xys_.append([xys, opacities_])
 
-            except:
-                out_img = out_img_1
-            # out_img = out_img.half()
-            # imgs_.append(out_img)
+            # tile_width = math.ceil(self.W / float(self.tile_size))
+            # tile_height = math.ceil(self.H / float(self.tile_size))
+            # tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
+            # isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
+            # render_colors, render_alphas = rasterize_to_pixels(xys, conics, rgbs_, opacities_, self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
+            # out_img = render_colors * render_alphas + (1.0 - render_alphas) * 1
+            # out_img = out_img.squeeze()
+            renders_colors, renders_alphas, _ = rasterization(means_, quats_ / quats_.norm(dim=-1, keepdim=True), scales_, opacities_[0], \
+                                                                rgbs_, self.viewmat, self.Ks, self.W, self.H, packed=False,)
+            out_img = renders_colors[0] * renders_alphas[0] + (1 - renders_alphas[0])
+
             images_per_video.append(out_img)
 
             # render the rest of the images
             for j in range(1, means.shape[1]//self.num_points):
-                torch.cuda.empty_cache()
-                means_delta = means[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]/10.0
+                means_delta = means[i][j*self.num_points:(j+1)*self.num_points][:limit_gaussian]/10.0
                 means_delta[:, -1] *= 0.01
-                # scales_delta = scales[i].contiguous().view(-1, 3)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
-                # quats_delta = quats[i].contiguous().view(-1, 4)[j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
+                # scales_delta = scales[i][j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
+                # quats_delta = quats[i][j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
                 means_ = means_ + means_delta
-                # scales_ = scales_.float() + scales_delta
-                # quats_ = quats_.float() + quats_delta
-                xys, depths, radii, conics, num_tiles_hit, cov3d = ProjectGaussians.apply(means_, scales_, 1, quats_, self.viewmat, self.viewmat, self.focal, self.focal, self.W / 2, self.H / 2, self.H, self.W, self.tile_bounds,)
-                # rgbs_ = rgbs[i].contiguous().view(-1, 3).float()
-                # opacities_ = opacities[i].contiguous().view(-1, 1).float()
-                try:
-                    if limit_gaussian_z > 0:
-                        # sort over xys[2] and take the first limit_gaussian_z
-                        _, indices = torch.sort(depths)
-                        xys = xys[indices[:limit_gaussian_z]]
-                        depths = depths[indices[:limit_gaussian_z]]
-                        radii = radii[indices[:limit_gaussian_z]]
-                        conics = conics[indices[:limit_gaussian_z]]
-                        # rgbs_ = rgbs_[indices[:limit_gaussian_z]]
-                        # opacities_ = opacities_[indices[:limit_gaussian_z]]
-                        num_tiles_hit = num_tiles_hit[indices[:limit_gaussian_z]]
+                # scales_ = scales_ + scales_delta
+                # quats_ = quats_ + quats_delta
+                # radii, xys, depths, conics, compensations = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
+                # rgbs_ = rgbs[i]#[j*self.num_points:(j+1)*self.num_points]
+                # rgbs_ = rgbs_[:limit_gaussian].unsqueeze(0)
+                
+                # opacities_ = opacities[i][j*self.num_points:(j+1)*self.num_points]
+                # opacities_ = opacities_[:limit_gaussian].view(1, -1)
 
-                    out_img = RasterizeGaussians.apply(xys, depths, radii, conics, num_tiles_hit, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.H, self.W,)
-                except:
-                    out_img = out_img_2
-                # out_img = out_img.half()
-                # imgs_.append(out_img)
+                renders_colors, renders_alphas, _ = rasterization(means_, quats_ / quats_.norm(dim=-1, keepdim=True), scales_, opacities_[0], \
+                                    rgbs_, self.viewmat, self.Ks, self.W, self.H, packed=False,)
+                out_img = renders_colors[0] * renders_alphas[0] + (1 - renders_alphas[0])
+                # # try:
+                # if limit_gaussian_z > 0:
+                #     # sort over xys[2] and take the first limit_gaussian_z
+                #     _, indices = torch.sort(depths[0])
+                #     xys = xys[:, indices[:limit_gaussian_z]]
+                #     depths = depths[:, indices[:limit_gaussian_z]]
+                #     radii = radii[:, indices[:limit_gaussian_z]]
+                #     conics = conics[:, indices[:limit_gaussian_z]]
+                #     rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
+                #     opacities_ = opacities_[:, indices[:limit_gaussian_z]]
+
+                # tile_width = math.ceil(self.W / float(self.tile_size))
+                # tile_height = math.ceil(self.H / float(self.tile_size))
+                # tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
+                # isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
+                # render_colors, render_alphas = rasterize_to_pixels(xys, conics, rgbs_, opacities_, self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
+                
+                # out_img = render_colors * render_alphas + (1.0 - render_alphas) * 1
+                # out_img = out_img.squeeze(0)
                 images_per_video.append(out_img)
             imgs_.append(torch.stack(images_per_video, dim=0))
+            
 
         imgs_ = torch.stack(imgs_, dim=0)
 
