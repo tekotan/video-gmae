@@ -307,17 +307,22 @@ class MaskedAutoencoderViT(nn.Module):
         imgs_ = []
         xys_ = []
         for i in range(means.shape[0]):
-            torch.cuda.empty_cache()
             images_per_video = []
             # render first image
-            means_ = means[i].contiguous()[:limit_gaussian]
-            scales_ = scales[i].contiguous()[:limit_gaussian]
-            quats_ = quats[i].contiguous()[:limit_gaussian]
-            opacities_ = opacities[i][:limit_gaussian].view(1, -1)
-            rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0)
+            means_ = means[i].contiguous().view(-1, 3)[:limit_gaussian]
+            scales_ = scales[i].contiguous().view(-1, 3)[:limit_gaussian]
+            quats_ = quats[i].contiguous().view(-1, 4)[:limit_gaussian]
+
+            means_ = means_.float()
+            scales_ = scales_.float()
+            quats_ = quats_.float()
+            self.viewmat = self.viewmat.float()
 
             radii, xys, depths, conics, _ = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
             
+            # rgbs_ = rgbs[i].view(-1, 3).float()[:limit_gaussian]
+            rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0)
+
             if return_depth:
                 depth_ = (depths[:limit_gaussian] - torch.min(depths)) / (torch.max(depths) - torch.min(depths))
                 # log scale
@@ -326,7 +331,7 @@ class MaskedAutoencoderViT(nn.Module):
                 rgbs_[:, 1] = depth_
                 rgbs_[:, 2] = depth_
 
-            # try:
+            opacities_ = opacities[i].view(-1, 1).float()[:limit_gaussian].view(1, -1)
             if limit_gaussian_z > 0:
                 # sort over depths and take the first limit_gaussian_z
                 _, indices = torch.sort(depths[0])
@@ -357,7 +362,8 @@ class MaskedAutoencoderViT(nn.Module):
             render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
             out_img = render_colors * render_alphas + (1.0 - render_alphas)
             out_img = out_img.squeeze()
-
+            # out_img = out_img.half()
+            # imgs_.append(out_img)
             images_per_video.append(out_img)
 
             # render the rest of the images
