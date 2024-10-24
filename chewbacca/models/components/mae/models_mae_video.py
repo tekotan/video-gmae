@@ -280,7 +280,7 @@ class MaskedAutoencoderViT(nn.Module):
         device = x_points.device
         dtype = x_points.dtype
 
-        means = 2*(torch.sigmoid(x_points[:, :, :3])-0.5)
+        means = 5*(torch.tanh(x_points[:, :, :3]))
         scales = self.scale_factor * torch.sigmoid(x_points[:, :, 3:6])
         quats = torch.sigmoid(x_points[:, :, 6:10])
         au = quats[:, :, :1]
@@ -314,50 +314,47 @@ class MaskedAutoencoderViT(nn.Module):
             opacities_ = opacities[i][:limit_gaussian].view(1, -1)
             rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0)
 
-            # radii, xys, depths, conics, _ = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
+            radii, xys, depths, conics, _ = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
             
-            # if return_depth:
-            #     depth_ = (depths[:limit_gaussian] - torch.min(depths)) / (torch.max(depths) - torch.min(depths))
-            #     # log scale
-            #     depth_ = torch.log(depth_)
-            #     rgbs_[:, 0] = depth_
-            #     rgbs_[:, 1] = depth_
-            #     rgbs_[:, 2] = depth_
+            if return_depth:
+                depth_ = (depths[:limit_gaussian] - torch.min(depths)) / (torch.max(depths) - torch.min(depths))
+                # log scale
+                depth_ = torch.log(depth_)
+                rgbs_[:, 0] = depth_
+                rgbs_[:, 1] = depth_
+                rgbs_[:, 2] = depth_
 
-            # # try:
-            # if limit_gaussian_z > 0:
-            #     # sort over depths and take the first limit_gaussian_z
-            #     _, indices = torch.sort(depths[0])
-            #     xys = xys[:, indices[:limit_gaussian_z]]
-            #     depths = depths[:, indices[:limit_gaussian_z]]
-            #     radii = radii[:, indices[:limit_gaussian_z]]
-            #     conics = conics[:, indices[:limit_gaussian_z]]
-            #     rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
-            #     opacities_ = opacities_[:, indices[:limit_gaussian_z]]
+            # try:
+            if limit_gaussian_z > 0:
+                # sort over depths and take the first limit_gaussian_z
+                _, indices = torch.sort(depths[0])
+                xys = xys[:, indices[:limit_gaussian_z]]
+                depths = depths[:, indices[:limit_gaussian_z]]
+                radii = radii[:, indices[:limit_gaussian_z]]
+                conics = conics[:, indices[:limit_gaussian_z]]
+                rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
+                opacities_ = opacities_[:, indices[:limit_gaussian_z]]
 
-            # if select_range_z > 0:
-            #     _, indices = torch.sort(depths[0])
-            #     start_ = select_range_z[0]
-            #     end_ = select_range_z[1]
-            #     xys = xys[:, indices[start_:end_]]
-            #     depths = depths[:, indices[start_:end_]]
-            #     radii = radii[:, indices[start_:end_]]
-            #     conics = conics[:, indices[start_:end_]]
-            #     rgbs_ = rgbs_[:, indices[start_:end_]]
-            #     opacities_ = opacities_[:, indices[start_:end_]]
+            if select_range_z > 0:
+                _, indices = torch.sort(depths[0])
+                start_ = select_range_z[0]
+                end_ = select_range_z[1]
+                xys = xys[:, indices[start_:end_]]
+                depths = depths[:, indices[start_:end_]]
+                radii = radii[:, indices[start_:end_]]
+                conics = conics[:, indices[start_:end_]]
+                rgbs_ = rgbs_[:, indices[start_:end_]]
+                opacities_ = opacities_[:, indices[start_:end_]]
 
-            # xys_.append([xys, opacities_])
+            xys_.append([xys, opacities_])
 
-            # tile_width = math.ceil(self.W / float(self.tile_size))
-            # tile_height = math.ceil(self.H / float(self.tile_size))
-            # tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
-            # isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
-            # render_colors, render_alphas = rasterize_to_pixels(xys, conics, rgbs_, opacities_, self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
-            # out_img = render_colors * render_alphas + (1.0 - render_alphas) * 1
-            # out_img = out_img.squeeze()
-            renders_colors, renders_alphas, _ = rasterization(means_, quats_ / quats_.norm(dim=-1, keepdim=True), scales_, opacities_[0], \
-                                                                rgbs_, self.viewmat, self.Ks, self.W, self.H, packed=False,)
-            out_img = renders_colors[0] * renders_alphas[0] + (1 - renders_alphas[0])
+            tile_width = math.ceil(self.W / float(self.tile_size))
+            tile_height = math.ceil(self.H / float(self.tile_size))
+            tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
+            isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
+            render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
+            out_img = render_colors * render_alphas + (1.0 - render_alphas)
+            out_img = out_img.squeeze()
 
             images_per_video.append(out_img)
 
@@ -370,36 +367,33 @@ class MaskedAutoencoderViT(nn.Module):
                 means_ = means_ + means_delta
                 # scales_ = scales_ + scales_delta
                 # quats_ = quats_ + quats_delta
-                # radii, xys, depths, conics, compensations = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
+                radii, xys, depths, conics, compensations = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
                 # rgbs_ = rgbs[i]#[j*self.num_points:(j+1)*self.num_points]
                 # rgbs_ = rgbs_[:limit_gaussian].unsqueeze(0)
                 
                 # opacities_ = opacities[i][j*self.num_points:(j+1)*self.num_points]
                 # opacities_ = opacities_[:limit_gaussian].view(1, -1)
 
-                renders_colors, renders_alphas, _ = rasterization(means_, quats_ / quats_.norm(dim=-1, keepdim=True), scales_, opacities_[0], \
-                                    rgbs_, self.viewmat, self.Ks, self.W, self.H, packed=False,)
-                out_img = renders_colors[0] * renders_alphas[0] + (1 - renders_alphas[0])
-                # # try:
-                # if limit_gaussian_z > 0:
-                #     # sort over xys[2] and take the first limit_gaussian_z
-                #     _, indices = torch.sort(depths[0])
-                #     xys = xys[:, indices[:limit_gaussian_z]]
-                #     depths = depths[:, indices[:limit_gaussian_z]]
-                #     radii = radii[:, indices[:limit_gaussian_z]]
-                #     conics = conics[:, indices[:limit_gaussian_z]]
-                #     rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
-                #     opacities_ = opacities_[:, indices[:limit_gaussian_z]]
+                if limit_gaussian_z > 0:
+                    # sort over xys[2] and take the first limit_gaussian_z
+                    _, indices = torch.sort(depths[0])
+                    xys = xys[:, indices[:limit_gaussian_z]]
+                    depths = depths[:, indices[:limit_gaussian_z]]
+                    radii = radii[:, indices[:limit_gaussian_z]]
+                    conics = conics[:, indices[:limit_gaussian_z]]
+                    rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
+                    opacities_ = opacities_[:, indices[:limit_gaussian_z]]
 
-                # tile_width = math.ceil(self.W / float(self.tile_size))
-                # tile_height = math.ceil(self.H / float(self.tile_size))
-                # tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
-                # isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
-                # render_colors, render_alphas = rasterize_to_pixels(xys, conics, rgbs_, opacities_, self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
+                tile_width = math.ceil(self.W / float(self.tile_size))
+                tile_height = math.ceil(self.H / float(self.tile_size))
+                tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
+                isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
+                render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
                 
-                # out_img = render_colors * render_alphas + (1.0 - render_alphas) * 1
-                # out_img = out_img.squeeze(0)
+                out_img = render_colors * render_alphas + (1.0 - render_alphas)
+                out_img = out_img.squeeze(0)
                 images_per_video.append(out_img)
+                
             imgs_.append(torch.stack(images_per_video, dim=0))
             
 
