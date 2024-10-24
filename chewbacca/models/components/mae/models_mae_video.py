@@ -306,6 +306,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         imgs_ = []
         xys_ = []
+
         for i in range(means.shape[0]):
             images_per_video = []
             # render first image
@@ -389,21 +390,19 @@ class MaskedAutoencoderViT(nn.Module):
                     depths = depths[:, indices[:limit_gaussian_z]]
                     radii = radii[:, indices[:limit_gaussian_z]]
                     conics = conics[:, indices[:limit_gaussian_z]]
-                    rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
-                    opacities_ = opacities_[:, indices[:limit_gaussian_z]]
+                    # rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
+                    # opacities_ = opacities_[:, indices[:limit_gaussian_z]]
 
                 tile_width = math.ceil(self.W / float(self.tile_size))
                 tile_height = math.ceil(self.H / float(self.tile_size))
                 tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
                 isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
                 render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
-                
                 out_img = render_colors * render_alphas + (1.0 - render_alphas)
-                out_img = out_img.squeeze(0)
+                out_img = out_img.squeeze()
                 images_per_video.append(out_img)
                 
             imgs_.append(torch.stack(images_per_video, dim=0))
-            
 
         imgs_ = torch.stack(imgs_, dim=0)
 

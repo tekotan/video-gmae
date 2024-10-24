@@ -165,7 +165,8 @@ class GMAELitModule(LightningModule):
         loss = 0
         count = 0
         for i in range(imgs_.shape[0]):
-            if(torch.sum(pred[i])>0):
+            # if(torch.sum(pred[i])>0):
+            if True:
                 if "loss-masked" in self.cfg.training_type:
                     # loss on only the masked patches
                     target = self.encoder.patchify(imgs_[i][None, :, 0])
@@ -253,8 +254,8 @@ class GMAELitModule(LightningModule):
                 loss_dict  = {"loss": loss}
                 if "mythostra" in self.cfg.training_type:
                     for j in [32,64,128,256,512]:
-                        x_points = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian=j)
-                        pred_ = self.encoder.forward_render(x_points, limit_gaussian=j) # [N, L, p*p*3]
+                        x_points_ = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian=j)
+                        pred_ = self.encoder.forward_render(x_points_, limit_gaussian=j) # [N, L, p*p*3]
 
                         loss_ = self.forward_loss(image[:, :, None, :, :], pred_, mask, additional_data=None)
                         loss_dict[f"loss_{j}"] = loss_ / (self.cfg.vocab_size - j)
@@ -263,7 +264,6 @@ class GMAELitModule(LightningModule):
                 if "save-images" in self.cfg.training_type and batch_idx<1000000:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(image, mask_ratio=0.0)
-                    x_points = self.encoder.forward_decoder(latent, ids_restore)
                     # renormalize to 0,1
                     imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
                     imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
@@ -272,8 +272,9 @@ class GMAELitModule(LightningModule):
 
                     preds_all = []
                     if "save-images-z" in self.cfg.training_type:
+                        x_points_ = self.encoder.forward_decoder(latent, ids_restore)
                         for j in [32,64,128,256,512,-1]:
-                            pred_ = self.encoder.forward_render(x_points, limit_gaussian_z=j)
+                            pred_ = self.encoder.forward_render(x_points_, limit_gaussian_z=j)
                             preds_all.append(pred_)
                         preds_2 = torch.stack(preds_all, dim=0)
                         preds = preds_2[:, :, 0].permute(1, 2, 0, 3, 4).reshape(preds_2.shape[1], preds_2.shape[3], preds_2.shape[0]*preds_2.shape[4], 3)
@@ -291,6 +292,7 @@ class GMAELitModule(LightningModule):
 
 
                     # get points on xy density map
+                    x_points = self.encoder.forward_decoder(latent, ids_restore)
                     _, xys = self.encoder.forward_render(x_points, return_gaussians=True, limit_gaussian_z=-1)
                     plane_ = torch.zeros(len(xys), self.cfg.input_size, self.cfg.input_size, 3).to(device=device).to(dtype=dtype)
                     # try:
@@ -372,8 +374,6 @@ class GMAELitModule(LightningModule):
                 if "save-images" in self.cfg.training_type and batch_idx<1:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
-                        if not self.cfg.random_frames:
-                            x_points = self.encoder.forward_decoder(latent, ids_restore)
                     # renormalize to 0,1
                     imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
                     imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
@@ -382,12 +382,16 @@ class GMAELitModule(LightningModule):
 
                     preds_all = []
                     if "save-images-z" in self.cfg.training_type:
-                        for j in [32,64,128,256,512,-1]:
+                        with torch.no_grad():
                             if not self.cfg.random_frames:
-                                pred_ = self.encoder.forward_render(x_points, limit_gaussian_z=j)
-                            else:
-                                pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j)
-                            preds_all.append(pred_)
+                                x_points = self.encoder.forward_decoder(latent, ids_restore)
+                                
+                            for j in [32,64,128,256,512,-1]:
+                                if not self.cfg.random_frames:
+                                    pred_ = self.encoder.forward_render(x_points, limit_gaussian_z=j)
+                                else:
+                                    pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j)
+                                preds_all.append(pred_)
                         preds_2 = torch.stack(preds_all, dim=0)
                         pred_ab = []
                         for i in range(preds_2.shape[2]):
