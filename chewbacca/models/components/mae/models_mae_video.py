@@ -419,6 +419,7 @@ class MaskedAutoencoderViT(nn.Module):
     def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1):
         init_imgs = []
         next_imgs = []
+        import ipdb; ipdb.set_trace()
         for i in range(1, self.total_frames):
             torch.cuda.empty_cache()
             with torch.no_grad():
