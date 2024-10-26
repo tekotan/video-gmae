@@ -282,9 +282,13 @@ class MaskedAutoencoderViT(nn.Module):
         device = x_points.device
         dtype = x_points.dtype
 
-        means = 5*(torch.tanh(x_points[:, :, :3]))
+        means = 5 * (torch.tanh(x_points[:, :, :3]))
         scales = self.scale_factor * torch.sigmoid(x_points[:, :, 3:6])
         quats = torch.sigmoid(x_points[:, :, 6:10])
+        # means = x_points[:, :, :3]
+        # scales = x_points[:, :, 3:6]
+        # quats = x_points[:, :, 6:10]
+
         au = quats[:, :, :1]
         av = quats[:, :, 1:2]
         aw = quats[:, :, 2:3]
@@ -296,8 +300,8 @@ class MaskedAutoencoderViT(nn.Module):
             torch.sqrt(au) * torch.cos(2.0 * torch.pi * aw),
         ], dim=-1)
 
-        rgbs = torch.sigmoid(x_points[:, :, 10:13])
-        opacities = torch.sigmoid(x_points[:, :, 13:14])
+        rgbs = x_points[:, :, 10:13]
+        opacities = x_points[:, :, 13:14]
 
 
         self.viewmat = self.viewmat.to(dtype=dtype).to(device=device)
@@ -478,7 +482,7 @@ class MaskedAutoencoderViT(nn.Module):
             pred, deltas = self.forward_render(x_points, return_deltas=True)
             loss = self.forward_loss(imgs, pred, mask, additional_data, deltas, frame_num=random_frame)
         else:
-            x_points, random_frame = self.forward_decoder(latent, ids_restore)
+            x_points = self.forward_decoder(latent, ids_restore)
             pred, deltas = self.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
             loss = self.forward_loss(imgs, pred, mask, additional_data, deltas)
         
