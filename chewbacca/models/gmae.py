@@ -183,8 +183,10 @@ class GMAELitModule(LightningModule):
                         loss += (loss_ * mask[i]).sum() / mask.sum()  # mean loss on removed patches
                 else:
                     if self.cfg.random_frames and frame_num is not None:
-                        loss += torch.nn.functional.mse_loss(torch.cat([imgs_[i][:, 0:1], imgs_[i][:, frame_num:frame_num+1]], axis=1), 
-                                                        pred[i].permute(3, 0, 1, 2))
+                        # loss += torch.nn.functional.mse_loss(torch.cat([imgs_[i][:, 0:1], imgs_[i][:, frame_num:frame_num+1]], axis=1), 
+                        #                                 pred[i].permute(3, 0, 1, 2)) # 0, t
+                        loss += torch.nn.functional.mse_loss(imgs_[i][:, frame_num-1:frame_num+1], pred[i].permute(3, 0, 1, 2)) # t, t+1
+
                     else:
                         loss += torch.nn.functional.mse_loss(imgs_[i][:, :self.num_frames], pred[i].permute(3, 0, 1, 2))
                 count += 1

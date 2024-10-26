@@ -285,9 +285,6 @@ class MaskedAutoencoderViT(nn.Module):
         means = 5 * (torch.tanh(x_points[:, :, :3]))
         scales = self.scale_factor * torch.sigmoid(x_points[:, :, 3:6])
         quats = torch.sigmoid(x_points[:, :, 6:10])
-        # means = x_points[:, :, :3]
-        # scales = x_points[:, :, 3:6]
-        # quats = x_points[:, :, 6:10]
 
         au = quats[:, :, :1]
         av = quats[:, :, 1:2]
@@ -364,7 +361,7 @@ class MaskedAutoencoderViT(nn.Module):
             tile_height = math.ceil(self.H / float(self.tile_size))
             tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
             isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
-            render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
+            render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
             out_img = render_colors * render_alphas + (1.0 - render_alphas)
             out_img = out_img.squeeze()
             # out_img = out_img.half()
@@ -401,7 +398,7 @@ class MaskedAutoencoderViT(nn.Module):
                 tile_height = math.ceil(self.H / float(self.tile_size))
                 tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
                 isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
-                render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids)
+                render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
                 out_img = render_colors * render_alphas + (1.0 - render_alphas)
                 out_img = out_img.squeeze()
                 images_per_video.append(out_img)
@@ -423,7 +420,6 @@ class MaskedAutoencoderViT(nn.Module):
     def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1):
         init_imgs = []
         next_imgs = []
-        import ipdb; ipdb.set_trace()
         for i in range(1, self.total_frames):
             torch.cuda.empty_cache()
             with torch.no_grad():
@@ -432,12 +428,10 @@ class MaskedAutoencoderViT(nn.Module):
                 init_imgs.append(imgs_[:, 0:1])
                 next_imgs.append(imgs_[:, 1:2])
 
-        init_imgs = torch.cat(init_imgs, axis=1).mean(axis=1, keepdim=True)
+        init_imgs = torch.cat(init_imgs, axis=1).mean(axis=1, keepdim=True) # 0, t
+        init_imgs = init_imgs[0] # t, t+1
         next_imgs = torch.cat(next_imgs, axis=1)
         imgs_ = torch.cat([init_imgs, next_imgs], axis=1)
-
-        del init_imgs
-        del next_imgs
 
         return imgs_
 

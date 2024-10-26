@@ -96,7 +96,7 @@ def main(
     save_imgs: bool = True,
     img_path: Optional[Path] = None,
     iterations: int = 300,
-    lr: float = 1e-6,
+    lr: float = 1e-5,
     model_type: Literal["3dgs", "2dgs"] = "3dgs",
 ) -> None:
     if img_path:
