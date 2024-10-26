@@ -178,3 +178,4 @@ lart/models/components/stylegan2_discriminator/*
 weights/
 a/
 evals/
+results/
