@@ -251,7 +251,14 @@ configs:
 
     deltas_reg_weight: 0.0
     random_frames: False
+    mean_deltas: True
+    rgb_deltas: False
 
     drop_path: 0.0
     preload: 0
     chunk_size: 1024
+
+    inference:
+        testing: False
+        depth: False
+        correspondences: False

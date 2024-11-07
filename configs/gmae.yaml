@@ -255,3 +255,8 @@ configs:
     drop_path: 0.0
     preload: 0
     chunk_size: 1024
+
+    inference:
+        testing: False
+        depth: False
+        correspondences: False

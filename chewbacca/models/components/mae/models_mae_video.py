@@ -25,7 +25,8 @@ from timm.models.vision_transformer import (Attention, Block, LayerScale,
                                             PatchEmbed)
 
 from lart.models.components.mae.pos_embed import (get_2d_sincos_pos_embed,
-                                                  get_3d_sincos_pos_embed)
+                                                  get_3d_sincos_pos_embed,
+                                                  get_1d_sincos_pos_embed_from_grid)
 
 from gsplat.cuda._wrapper import (
     fully_fused_projection,
@@ -34,7 +35,10 @@ from gsplat.cuda._wrapper import (
     rasterize_to_pixels,
 )
 
+import cv2
+
 from gsplat import rasterization
+import matplotlib.pyplot as plt
 
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
@@ -44,12 +48,14 @@ class MaskedAutoencoderViT(nn.Module):
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, 
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
-                 deltas_reg_weight=0.0, random_frames=False):
+                 deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
         self.deltas_reg_weight = deltas_reg_weight
         self.random_frames = random_frames
+        self.mean_deltas = mean_deltas
+        self.rgb_deltas = rgb_deltas
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
@@ -129,7 +135,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
         
         if self.random_frames:
-            frame_pos_embed = get_3d_sincos_pos_embed(self.frame_pos_embed.shape[-1], 1, self.total_frames, cls_token=False)
+            frame_pos_embed = get_1d_sincos_pos_embed_from_grid(self.frame_pos_embed.shape[-1], np.array(list(range(self.total_frames))))
             self.frame_pos_embed.data.copy_(torch.from_numpy(frame_pos_embed).float().unsqueeze(0))
 
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
@@ -273,7 +279,7 @@ class MaskedAutoencoderViT(nn.Module):
             return x_points, random_frame
         return x_points
     
-    def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False):
+    def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False, return_corres=False):
         if limit_gaussian > 0:
             limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
         else:
@@ -322,16 +328,15 @@ class MaskedAutoencoderViT(nn.Module):
 
             radii, xys, depths, conics, _ = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
             
-            # rgbs_ = rgbs[i].view(-1, 3).float()[:limit_gaussian]
             rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0)
 
             if return_depth:
-                depth_ = (depths[:limit_gaussian] - torch.min(depths)) / (torch.max(depths) - torch.min(depths))
+                depth_ = (depths[:, :limit_gaussian] - torch.min(depths)) / (torch.max(depths) - torch.min(depths))
                 # log scale
                 depth_ = torch.log(depth_)
-                rgbs_[:, 0] = depth_
-                rgbs_[:, 1] = depth_
-                rgbs_[:, 2] = depth_
+                rgbs_[:, :, 0] = depth_
+                rgbs_[:, :, 1] = depth_
+                rgbs_[:, :, 2] = depth_
 
             opacities_ = opacities[i].view(-1, 1).float()[:limit_gaussian].view(1, -1)
             if limit_gaussian_z > 0:
@@ -364,25 +369,26 @@ class MaskedAutoencoderViT(nn.Module):
             render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
             out_img = render_colors * render_alphas + (1.0 - render_alphas)
             out_img = out_img.squeeze()
-            # out_img = out_img.half()
-            # imgs_.append(out_img)
+
             images_per_video.append(out_img)
 
             # render the rest of the images
-            for j in range(1, means.shape[1]//self.num_points):
-                means_delta = means[i][j*self.num_points:(j+1)*self.num_points][:limit_gaussian]/10.0
-                means_delta[:, -1] *= 0.01
-                # scales_delta = scales[i][j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
-                # quats_delta = quats[i][j*self.num_points:(j+1)*self.num_points][:limit_gaussian]
-                means_ = means_ + means_delta
+            for j in range(1, means.shape[1]//limit_gaussian):
+                means_delta = means[i][j*limit_gaussian:(j+1)*limit_gaussian]/10.0
+                # scales_delta = scales[i][j*limit_gaussian:(j+1)*limit_gaussian]
+                # quats_delta = quats[i][j*limit_gaussian:(j+1)*limit_gaussian]
+                if self.mean_deltas:
+                    means_ = means_ + means_delta
                 # scales_ = scales_ + scales_delta
                 # quats_ = quats_ + quats_delta
                 radii, xys, depths, conics, compensations = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
-                # rgbs_ = rgbs[i]#[j*self.num_points:(j+1)*self.num_points]
-                # rgbs_ = rgbs_[:limit_gaussian].unsqueeze(0)
+
+                if self.rgb_deltas:
+                    rgbs_delta = rgbs[i][j*limit_gaussian:(j+1)*limit_gaussian].unsqueeze(0)
+                    rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0) + rgbs_delta
                 
-                # opacities_ = opacities[i][j*self.num_points:(j+1)*self.num_points]
-                # opacities_ = opacities_[:limit_gaussian].view(1, -1)
+                # opacities_ = opacities[i][j*limit_gaussian:(j+1)*limit_gaussian]
+                # opacities_ = opacities_.view(1, -1)
 
                 if limit_gaussian_z > 0:
                     # sort over xys[2] and take the first limit_gaussian_z
@@ -391,8 +397,11 @@ class MaskedAutoencoderViT(nn.Module):
                     depths = depths[:, indices[:limit_gaussian_z]]
                     radii = radii[:, indices[:limit_gaussian_z]]
                     conics = conics[:, indices[:limit_gaussian_z]]
-                    # rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
+                    if self.rgb_deltas:
+                        rgbs_ = rgbs_[:, indices[:limit_gaussian_z]]
                     # opacities_ = opacities_[:, indices[:limit_gaussian_z]]
+                
+                xys_.append([xys, opacities_])
 
                 tile_width = math.ceil(self.W / float(self.tile_size))
                 tile_height = math.ceil(self.H / float(self.tile_size))
@@ -410,31 +419,91 @@ class MaskedAutoencoderViT(nn.Module):
         if return_gaussians:
             return 0, xys_
         if return_deltas:
-            mean_deltas = means.contiguous().view(means.shape[0], -1, 3)[self.num_points:][:limit_gaussian]/10.0
-            scales_delta = scales[i].contiguous().view(-1, 3)[self.num_points:][:limit_gaussian]
-            quats_delta = quats[i].contiguous().view(-1, 4)[self.num_points:][:limit_gaussian]
+            mean_deltas = means.contiguous().view(means.shape[0], -1, 3)[limit_gaussian:]/10.0
+            scales_delta = scales[i].contiguous().view(-1, 3)[limit_gaussian:]
+            quats_delta = quats[i].contiguous().view(-1, 4)[limit_gaussian:]
             return imgs_, (mean_deltas, scales_delta, quats_delta)
-        
+
         return imgs_
         
-    def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1):
+    def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_depth=False, return_corres=False):
         init_imgs = []
         next_imgs = []
+        gaussian_centers = []
+
         for i in range(1, self.total_frames):
-            torch.cuda.empty_cache()
             with torch.no_grad():
                 x_points = self.forward_decoder(x, ids_restore, limit_gaussian=limit_gaussian, frame_num=i)
-                imgs_ = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z).cpu()
+                imgs_ = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_depth=return_depth, return_corres=return_corres).cpu()
+
+                if return_corres:
+                    gaussians = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_gaussians=True)[1]
+                    gaussians = torch.cat(list(map(lambda x: x[0], gaussians))).clip(0, self.H).cpu()
+                    gaussian_centers.append(gaussians)
+
                 init_imgs.append(imgs_[:, 0:1])
                 next_imgs.append(imgs_[:, 1:2])
 
         init_imgs = torch.cat(init_imgs, axis=1).mean(axis=1, keepdim=True) # 0, t
-        init_imgs = init_imgs[0] # t, t+1
+        # init_imgs = torch.cat(init_imgs, axis=1)[:, 0:1] # t, t+1
         next_imgs = torch.cat(next_imgs, axis=1)
         imgs_ = torch.cat([init_imgs, next_imgs], axis=1)
 
-        return imgs_
+        if return_corres:
 
+            gaussian_centers = torch.stack(gaussian_centers)
+            init_gaussians = gaussian_centers[:, ::2].mean(axis=0, keepdim=True)
+            next_gaussians = gaussian_centers[:, 1::2]
+
+            gaussians = torch.cat([init_gaussians, next_gaussians], axis=0).permute(1, 0, 2, 3)
+            diffs = gaussians[:, 1:] - gaussians[:, :-1] # batch x seq_len-1 x n_gauss x 2
+            dists = diffs.norm(dim=-1) # batch x seq_len-1 x n_gauss
+            for batch in range(imgs_.shape[0]):
+                gaussian_mapping = None
+                img_hist = []
+                gauss_indices = ((torch.logical_and(dists[batch] < (self.H * 0.1), dists[batch] > (self.H * 0.01))).sum(dim=0) > 25).nonzero(as_tuple=True)
+                # gauss_indices = (dists[batch] < (self.H * 0.3)).all(dim=0).nonzero(as_tuple=True)
+                for idx in range(imgs_.shape[1]):
+                    img, mapping = self.plot_correspondences(gaussians[batch, idx, gauss_indices[0]], imgs_[batch, idx], mapping=gaussian_mapping, history=img_hist)
+                    imgs_[batch, idx] = img
+
+                    gaussian_mapping = mapping if gaussian_mapping is None and limit_gaussian_z < 0 else gaussian_mapping
+
+                    if limit_gaussian_z < 0:
+                        img_hist.append(gaussians[batch, idx, gauss_indices[0]])
+
+        return imgs_
+    
+    def plot_correspondences(self, gaussians, image, mapping=None, history=[]):
+        gaussians_mapping = torch.zeros((gaussians.shape[0], 3))
+        img = (image.cpu().numpy() * 255).astype(np.uint8)
+        max_distance = np.sqrt(self.H**2 + self.W**2)
+
+        for idx, point in enumerate(gaussians):
+            x, y = point
+            distance = np.sqrt(x**2 + y**2)
+            normalized_distance = min(distance / max_distance, 1.0)
+
+            cmap = plt.get_cmap('plasma')
+            if mapping is not None:
+                color = mapping[idx].tolist()
+            else:
+                color = cmap(normalized_distance)
+            
+            rgb_color = (int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
+
+            gaussians_mapping[idx] = torch.from_numpy(np.array(rgb_color) / 255)
+
+            cv2.circle(img, (int(x), int(y)), radius=2, color=rgb_color, thickness=-1)
+            to_tuple = lambda x: (int(x[0].item()), int(x[1].item()))
+
+            for j in range(1, len(history)):
+                cv2.line(img, to_tuple(history[j-1][idx]), to_tuple(history[j][idx]), rgb_color, 1)
+            if len(history) > 0:
+                cv2.line(img, to_tuple(history[-1][idx]), (int(x), int(y)), rgb_color, 1)
+        
+        return torch.from_numpy(img).to(dtype=image.dtype) / 255, gaussians_mapping
+            
     def forward_loss(self, imgs, pred, mask, additional_data=None, deltas=None, frame_num=None):
         """
         imgs: [N, 3, H, W]

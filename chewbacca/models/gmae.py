@@ -104,6 +104,8 @@ class GMAELitModule(LightningModule):
                                                                     scale_vocab=self.cfg.scale_vocab,
                                                                     deltas_reg_weight=self.cfg.deltas_reg_weight,
                                                                     random_frames=self.cfg.random_frames,
+                                                                    mean_deltas=self.cfg.mean_deltas,
+                                                                    rgb_deltas=self.cfg.rgb_deltas
                                                                 )
             
         
@@ -127,6 +129,7 @@ class GMAELitModule(LightningModule):
 
         # create folders for storing results
         os.makedirs(self.cfg.storage_folder + "/results/", exist_ok=True)
+        os.makedirs(self.cfg.storage_folder + "/tests/", exist_ok=True)
         os.makedirs(self.cfg.storage_folder + "/videos/", exist_ok=True)
         log.info("Storage folder : " + self.cfg.storage_folder)
 
@@ -183,9 +186,9 @@ class GMAELitModule(LightningModule):
                         loss += (loss_ * mask[i]).sum() / mask.sum()  # mean loss on removed patches
                 else:
                     if self.cfg.random_frames and frame_num is not None:
-                        # loss += torch.nn.functional.mse_loss(torch.cat([imgs_[i][:, 0:1], imgs_[i][:, frame_num:frame_num+1]], axis=1), 
-                        #                                 pred[i].permute(3, 0, 1, 2)) # 0, t
-                        loss += torch.nn.functional.mse_loss(imgs_[i][:, frame_num-1:frame_num+1], pred[i].permute(3, 0, 1, 2)) # t, t+1
+                        loss += torch.nn.functional.mse_loss(torch.cat([imgs_[i][:, 0:1], imgs_[i][:, frame_num:frame_num+1]], axis=1), 
+                                                        pred[i].permute(3, 0, 1, 2)) # 0, t
+                        # loss += torch.nn.functional.mse_loss(imgs_[i][:, frame_num-1:frame_num+1], pred[i].permute(3, 0, 1, 2)) # t, t+1
 
                     else:
                         loss += torch.nn.functional.mse_loss(imgs_[i][:, :self.num_frames], pred[i].permute(3, 0, 1, 2))
@@ -356,11 +359,11 @@ class GMAELitModule(LightningModule):
                 if "rand-mask" in self.cfg.training_type:
                     p_ = np.random.rand()
                     if p_ < 0.7:
-                        mask_ = 0.95
+                        mask_ = 0.9
                     else:
                         mask_ = (np.random.rand() + 1)/2
                 else:
-                    mask_ = 0.95
+                    mask_ = 0.9
                 latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=mask_)
                 if self.cfg.random_frames:
                     x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
@@ -373,7 +376,7 @@ class GMAELitModule(LightningModule):
 
 
                 # save the masked images and reconstructed images
-                if "save-images" in self.cfg.training_type and batch_idx<1:
+                if "save-images" in self.cfg.training_type and batch_idx<1 or self.cfg.inference.testing and batch_idx % 200 == 0:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                     # renormalize to 0,1
@@ -390,9 +393,9 @@ class GMAELitModule(LightningModule):
                                 
                             for j in [32,64,128,256,512,-1]:
                                 if not self.cfg.random_frames:
-                                    pred_ = self.encoder.forward_render(x_points, limit_gaussian_z=j)
+                                    pred_ = self.encoder.forward_render(x_points, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences)
                                 else:
-                                    pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j)
+                                    pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences)
                                 preds_all.append(pred_)
                         preds_2 = torch.stack(preds_all, dim=0)
                         pred_ab = []
@@ -404,7 +407,7 @@ class GMAELitModule(LightningModule):
                     final_image_ = []
                     for i in range(len(pred_ab)):
                         final_image = np.concatenate([imgs[:, i], pred_ab[i]], axis=2).reshape(-1, (imgs[:, 0].shape[2]+pred_ab[0].shape[2]), 3)
-                        if "k400" in self.cfg.training_type:
+                        if "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type:
                             final_image_.append(final_image)
                         else:
                             final_image_.append(final_image[:, :, ::-1])
@@ -412,11 +415,16 @@ class GMAELitModule(LightningModule):
                     # save final image with epoch and batch index
                     train_ = "train" if self.training else "val"
                     global_rank = self.trainer.global_rank
-                    if global_rank==0:
+                    if global_rank==0 and not self.cfg.inference.testing:
                         # cv2.imwrite(self.cfg.storage_folder + f"/results/{train_}_{self.current_epoch}_{batch_idx}.png", final_image)
                         # make video with final_image_a, final_image_b using moviepy
                         clip = ImageSequenceClip(final_image_, fps=1)  # fps can be adjusted to your need
                         clip.write_videofile(f"{self.cfg.storage_folder}/results/{train_}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
+                    
+                    if self.cfg.inference.testing:
+                        title = "depth" if self.cfg.inference.depth else "corr" if  self.cfg.inference.correspondences else "test"
+                        clip = ImageSequenceClip(final_image_, fps=1)  # fps can be adjusted to your need
+                        clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
 
             # default return values
@@ -485,7 +493,6 @@ class GMAELitModule(LightningModule):
         torch.cuda.empty_cache()
 
     def validation_step(self, batch: Any, batch_idx: int):
-
         if(self.cfg.promt):
             self.generate(batch, batch_idx)
             return {"loss": 0}
@@ -517,7 +524,7 @@ class GMAELitModule(LightningModule):
             # rFID
             self.test_rfid.update(x_rgb_2, real=False)
             self.test_rfid.update(x_in_2, real=True)
-
+            
         loss = sum([v for k,v in loss_dict.items()])
 
         # update and log metrics
@@ -566,7 +573,7 @@ class GMAELitModule(LightningModule):
             self.test_rfid.reset()
 
         # for linear probe accuracy on imagenet and k400, compute and log the accuracy
-        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type):
+        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type):
             for i, layer_ in enumerate(self.linear_layer):
                 self.log("val/linear_probe_acc_" + str(i), self.val_acc[i].compute().item(), prog_bar=True, sync_dist=True)
                 log.info("Accuracy : " + str(self.val_acc[i].compute().item()))
