@@ -93,12 +93,12 @@ seed: null
 
 
 datamodule:
-    _target_: lart.datamodules.mae_datamodule.MAEDataModule
+    _target_: chewbacca.datamodules.mae_datamodule.MAEDataModule
     cfg: ${configs}
     train: ${train}
 
 model:
-    _target_: lart.models.vgpt.VGPT_LitModule
+    _target_: chewbacca.models.vgpt.VGPT_LitModule
     cfg: ${configs}
 
 configs:

@@ -24,7 +24,7 @@ from timm.layers import DropPath, Mlp, PatchEmbed
 from timm.models.vision_transformer import (Attention, Block, LayerScale,
                                             PatchEmbed)
 
-from lart.models.components.mae.pos_embed import (get_2d_sincos_pos_embed,
+from chewbacca.models.components.mae.pos_embed import (get_2d_sincos_pos_embed,
                                                   get_3d_sincos_pos_embed,
                                                   get_1d_sincos_pos_embed_from_grid)
 
