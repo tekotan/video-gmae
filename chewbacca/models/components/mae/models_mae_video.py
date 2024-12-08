@@ -48,7 +48,8 @@ class MaskedAutoencoderViT(nn.Module):
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, 
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
-                 deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False):
+                 deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
+                 rgb_deltas_scale=1, upsample_gaussians=None, spawning=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
@@ -56,6 +57,9 @@ class MaskedAutoencoderViT(nn.Module):
         self.random_frames = random_frames
         self.mean_deltas = mean_deltas
         self.rgb_deltas = rgb_deltas
+        self.rgb_deltas_scale = rgb_deltas_scale
+        self.upsample_gaussians = upsample_gaussians
+        self.spawning = spawning
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
@@ -120,7 +124,11 @@ class MaskedAutoencoderViT(nn.Module):
                 [0.0, 0.0, 0.0, 1.0],
             ], ],)
         self.decoder_pos_embed_gaussian = nn.Parameter(torch.rand(1, self.num_points*self.number_of_frames, decoder_embed_dim), requires_grad=True)  # learnable parameters
-        self.linear_gaussian = nn.Linear(decoder_embed_dim, int(14 * self.scale_vocab), bias=False)
+        self.params_per_gaussian = 30 if self.spawning else 14
+
+        self.linear_gaussian = nn.Linear(decoder_embed_dim, int(self.params_per_gaussian * self.scale_vocab), bias=False)
+
+        self.linear_deltas = nn.ModuleList([nn.Linear(decoder_embed_dim, int(self.params_per_gaussian * self.scale_vocab * upsample), bias=False) for upsample in np.cumprod(self.upsample_gaussians)])
 
         self.initialize_weights()
 
@@ -141,6 +149,10 @@ class MaskedAutoencoderViT(nn.Module):
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
         w = self.patch_embed.proj.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+        # initialize gaussian deltas to 0
+        for delta in self.linear_deltas:
+            torch.nn.init.constant_(delta.weight, 0)
 
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         torch.nn.init.normal_(self.cls_token, std=.02)
@@ -248,6 +260,14 @@ class MaskedAutoencoderViT(nn.Module):
         x_ = self.decoder_norm(x_)
         x_points = self.linear_gaussian(x_[:, -self.number_of_frames*self.num_points:])
 
+        for linear_delta in self.linear_deltas:
+            x_delta = linear_delta(x_[:, -self.number_of_frames*self.num_points:])
+            x_points_list = []  
+            for j in range(x_delta.shape[-1]//x_points.shape[-1]):
+                x_points_ = x_points + x_delta[:, :, j*x_points.shape[-1]:(j+1)*x_points.shape[-1]]
+                x_points_list.append(x_points_)
+            x_points = torch.cat(x_points_list, dim=1)
+        
         return x_points
 
     def forward_decoder(self, x, ids_restore, limit_gaussian=-1, frame_num=None):
@@ -272,18 +292,18 @@ class MaskedAutoencoderViT(nn.Module):
 
         if self.scale_vocab > 1:
             reshape_frames = self.number_of_frames
-            x_points = x_points.reshape(x_points.shape[0], reshape_frames, self.num_points, self.scale_vocab, 14)
+            x_points = x_points.reshape(x_points.shape[0], reshape_frames, self.num_points * np.prod(self.upsample_gaussians), self.scale_vocab, 14)
             x_points = x_points.permute(0, 1, 3, 2, 4)
-            x_points = x_points.reshape(x_points.shape[0], reshape_frames * self.scale_vocab * self.num_points, 14)
+            x_points = x_points.reshape(x_points.shape[0], reshape_frames * self.scale_vocab * self.num_points * np.prod(self.upsample_gaussians), 14)
         if self.random_frames and not frame_num:
             return x_points, random_frame
         return x_points
     
     def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False, return_corres=False):
         if limit_gaussian > 0:
-            limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
+            limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab * np.prod(self.upsample_gaussians)))
         else:
-            limit_gaussian = int(self.num_points * self.scale_vocab)
+            limit_gaussian = int(self.num_points * self.scale_vocab * np.prod(self.upsample_gaussians))
 
         device = x_points.device
         dtype = x_points.dtype
@@ -305,7 +325,6 @@ class MaskedAutoencoderViT(nn.Module):
 
         rgbs = x_points[:, :, 10:13]
         opacities = x_points[:, :, 13:14]
-
 
         self.viewmat = self.viewmat.to(dtype=dtype).to(device=device)
         self.Ks = self.Ks.to(dtype=dtype).to(device=device)
@@ -385,7 +404,12 @@ class MaskedAutoencoderViT(nn.Module):
 
                 if self.rgb_deltas:
                     rgbs_delta = rgbs[i][j*limit_gaussian:(j+1)*limit_gaussian].unsqueeze(0)
-                    rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0) + rgbs_delta
+                    if self.rgb_deltas_scale != 1:
+                        rgbs_ = torch.sigmoid(rgbs[i][:limit_gaussian].unsqueeze(0)) + torch.sigmoid(rgbs_delta) * self.rgb_deltas_scale
+                        rgbs_ = torch.clamp(rgbs_, 0, 1)
+                    else:
+                        rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0) + rgbs_delta
+                        rgbs_ = torch.sigmoid(rgbs_)
                 
                 # opacities_ = opacities[i][j*limit_gaussian:(j+1)*limit_gaussian]
                 # opacities_ = opacities_.view(1, -1)
@@ -407,7 +431,7 @@ class MaskedAutoencoderViT(nn.Module):
                 tile_height = math.ceil(self.H / float(self.tile_size))
                 tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
                 isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
-                render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
+                render_colors, render_alphas = rasterize_to_pixels(xys, conics, rgbs_, torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
                 out_img = render_colors * render_alphas + (1.0 - render_alphas)
                 out_img = out_img.squeeze()
                 images_per_video.append(out_img)
