@@ -261,7 +261,7 @@ class MaskedAutoencoderViT(nn.Module):
         x_points = self.linear_gaussian(x_[:, -self.number_of_frames*self.num_points:])
 
         for linear_delta in self.linear_deltas:
-            x_delta = linear_delta(x_[:, -self.number_of_frames*self.num_points:])
+            x_delta = linear_delta(x_[:, -self.number_of_frames*self.num_points:]).reshape(x_points.shape[0], x_points.shape[1], -1)
             x_points_list = []  
             for j in range(x_delta.shape[-1]//x_points.shape[-1]):
                 x_points_ = x_points + x_delta[:, :, j*x_points.shape[-1]:(j+1)*x_points.shape[-1]]
@@ -271,11 +271,6 @@ class MaskedAutoencoderViT(nn.Module):
         return x_points
 
     def forward_decoder(self, x, ids_restore, limit_gaussian=-1, frame_num=None):
-        if limit_gaussian > 0:
-            limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
-        else:
-            limit_gaussian = int(self.num_points * self.scale_vocab)
-
         x_ = self.decoder_embed(x)
         # choose pos embed for only the encoded patches
         ids_shuffle = torch.argsort(ids_restore, dim=1)
@@ -410,6 +405,8 @@ class MaskedAutoencoderViT(nn.Module):
                     else:
                         rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0) + rgbs_delta
                         rgbs_ = torch.sigmoid(rgbs_)
+                else:
+                    rgbs_ = torch.sigmoid(rgbs_)
                 
                 # opacities_ = opacities[i][j*limit_gaussian:(j+1)*limit_gaussian]
                 # opacities_ = opacities_.view(1, -1)
@@ -473,7 +470,7 @@ class MaskedAutoencoderViT(nn.Module):
         next_imgs = torch.cat(next_imgs, axis=1)
         imgs_ = torch.cat([init_imgs, next_imgs], axis=1)
 
-        if return_corres:
+        if return_corres and limit_gaussian_z < 0:
 
             gaussian_centers = torch.stack(gaussian_centers)
             init_gaussians = gaussian_centers[:, ::2].mean(axis=0, keepdim=True)
@@ -485,8 +482,9 @@ class MaskedAutoencoderViT(nn.Module):
             for batch in range(imgs_.shape[0]):
                 gaussian_mapping = None
                 img_hist = []
-                gauss_indices = ((torch.logical_and(dists[batch] < (self.H * 0.1), dists[batch] > (self.H * 0.01))).sum(dim=0) > 25).nonzero(as_tuple=True)
-                # gauss_indices = (dists[batch] < (self.H * 0.3)).all(dim=0).nonzero(as_tuple=True)
+                gauss_indices = torch.logical_and(dists[batch] < 20, (dists[batch] > 2).sum(dim=0) > 15).all(dim=0).nonzero(as_tuple=True)
+                # gauss_indices = ((gaussians[batch] > 25) & (gaussians[batch] < 75)).all(dim=0).nonzero(as_tuple=True)
+                # gauss_indices = ((dists[batch] > 1).sum(dim=0) > 5).nonzero(as_tuple=True)
                 for idx in range(imgs_.shape[1]):
                     img, mapping = self.plot_correspondences(gaussians[batch, idx, gauss_indices[0]], imgs_[batch, idx], mapping=gaussian_mapping, history=img_hist)
                     imgs_[batch, idx] = img
