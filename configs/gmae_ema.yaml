@@ -39,7 +39,7 @@ callbacks:
         _target_: lightning.pytorch.callbacks.Timer   
 
     ema:
-        _target_: lart.utils.ema.EMA
+        _target_: chewbacca.utils.ema.EMA
         decay: 0.999
         cpu_offload: False
         validate_original_weights: False
@@ -93,12 +93,12 @@ seed: null
 
 
 datamodule:
-    _target_: lart.datamodules.mae_datamodule.MAEDataModule
+    _target_: chewbacca.datamodules.mae_datamodule.MAEDataModule
     cfg: ${configs}
     train: ${train}
 
 model:
-    _target_: lart.models.vgpt.VGPT_LitModule
+    _target_: chewbacca.models.vgpt.VGPT_LitModule
     cfg: ${configs}
 
 configs:
