@@ -72,18 +72,23 @@ class VideoDataModule(LightningDataModule):
             video_paths_val = np.load("data/kinetics_400_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
             self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
-        
+        elif "kinetics" in self.hparams.cfg.training_type:
+            video_paths_train = np.load("data/kinetics_train_label.npy")
+            video_paths_val = np.load("data/kinetics_val_label.npy")
+            self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
+            self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
         elif "cater" in self.hparams.cfg.training_type:
             video_paths_train = np.load("data/cater_train_label.npy")
             video_paths_val = np.load("data/cater_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
             self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
-
         elif "ucf101" in self.hparams.cfg.training_type:
             video_paths_train = np.load("data/ucf101_train_label.npy")
             video_paths_val = np.load("data/ucf101_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
             self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+        else:
+            raise ValueError("Invalid Dataset Specification")
 
     def train_dataloader(self):
         dataloader = DataLoader(

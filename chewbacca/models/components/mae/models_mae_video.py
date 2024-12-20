@@ -49,7 +49,7 @@ class MaskedAutoencoderViT(nn.Module):
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, 
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
                  deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
-                 rgb_deltas_scale=1, upsample_gaussians=None, spawning=False):
+                 rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
@@ -60,12 +60,14 @@ class MaskedAutoencoderViT(nn.Module):
         self.rgb_deltas_scale = rgb_deltas_scale
         self.upsample_gaussians = upsample_gaussians
         self.spawning = spawning
+        self.frame_zero = frame_zero
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.number_of_frames = number_of_frames if not self.random_frames else 2
         self.total_frames = number_of_frames
+        self.input_frames = 1 if self.frame_zero else self.total_frames
         
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
@@ -73,7 +75,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.scale_vocab = int(scale_vocab)
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
         self.blocks = nn.ModuleList([
                 Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
@@ -137,7 +139,7 @@ class MaskedAutoencoderViT(nn.Module):
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
+        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
@@ -229,17 +231,23 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_encoder(self, x, mask_ratio):
         # embed patches
-        x_ = []
-        for a in range(x.shape[2]):
-            x_.append(self.patch_embed(x[:, :, a, :, :]))
-        x_ = torch.stack(x_, dim=1)[:, :self.total_frames]
-        x_ = rearrange(x_, 'n t c d -> n (t c) d')
+        if self.frame_zero:
+            # only take in frame 0
+            # normal behavior
+            x_ = self.patch_embed(x[:, :, 0, :, :])
+        else:
+            x_ = []
+            for a in range(x.shape[2]):
+                x_.append(self.patch_embed(x[:, :, a, :, :]))
+            x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
+            x_ = rearrange(x_, 'n t c d -> n (t c) d')
 
         # add pos embed w/o cls token
         x = x_ + self.pos_embed
 
         # masking: length -> length * mask_ratio
         x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        
 
         # apply Transformer blocks
         latents = []

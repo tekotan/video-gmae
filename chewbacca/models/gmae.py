@@ -108,7 +108,8 @@ class GMAELitModule(LightningModule):
                                                                     rgb_deltas=self.cfg.rgb_deltas,
                                                                     rgb_deltas_scale=self.cfg.rgb_deltas_scale,
                                                                     upsample_gaussians=self.cfg.upsample_gaussians,
-                                                                    spawning=self.cfg.spawning
+                                                                    spawning=self.cfg.spawning,
+                                                                    frame_zero=self.cfg.frame_zero
                                                                 )
             
         

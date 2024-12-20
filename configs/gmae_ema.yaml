@@ -257,6 +257,7 @@ configs:
 
     upsample_gaussians: []
     spawning: False
+    frame_zero: False
 
     drop_path: 0.0
     preload: 0
