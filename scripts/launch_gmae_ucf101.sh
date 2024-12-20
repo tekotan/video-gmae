@@ -5,7 +5,7 @@ hydra/launcher=submitit_slurm \
 launcher=slurm_em \
 model._target_="chewbacca.models.gmae.GMAELitModule" \
 datamodule._target_="chewbacca.datamodules.video_datamodule.VideoDataModule" \
-task_name=vit_base_ucf101_v3_16x_16x_16x \
+task_name=vit_base_ucf101_v3_upsample_stage_2 \
 trainer=ddp_unused \
 trainer.devices=4 \
 trainer.num_nodes=1 \
@@ -37,8 +37,8 @@ callbacks.model_checkpoint.every_n_epochs=1 \
 configs.training_type="ucf101_gaussian_save-images-z_no-mask_random-frames" \
 configs.load_strict=False \
 configs.mask_ratio=0.5 \
-configs.weights_path="/home/tekotan/Chewbacca_test/logs/vit_base_ucf101_v3_16x_16-32x/0/checkpoints/epoch_321.ckpt" \
-configs.upsample_gaussians=[16,16,16]
+configs.weights_path="/home/tekotan/Chewbacca_test/logs/vit_base_ucf101_v3_upsample_stage_1/1/checkpoints/epoch_272.ckpt" \
+configs.upsample_gaussians=[64,16]
 
 # configs.rgb_deltas_scale=0.05,0.1,0.25 \
 
@@ -48,9 +48,11 @@ configs.upsample_gaussians=[16,16,16]
 # #!/bin/bash
 # python chewbacca/validate.py -m \
 # --config-name gmae_ema.yaml \
+# hydra/launcher=submitit_slurm \
+# launcher=slurm_em \
 # model._target_="chewbacca.models.gmae.GMAELitModule" \
 # datamodule._target_="chewbacca.datamodules.video_datamodule.VideoDataModule" \
-# task_name=vit_base_ucf101_v3_16x_16-32x \
+# task_name=vit_base_ucf101_v3_upsample_stage_1 \
 # trainer=ddp_unused \
 # trainer.devices=1 \
 # trainer.num_nodes=1 \
@@ -79,10 +81,10 @@ configs.upsample_gaussians=[16,16,16]
 # configs.mean_deltas=True \
 # configs.scale_vocab=1 \
 # configs.sample_rate=1 \
-# configs.num_classes=200 \
+# configs.num_classes=100 \
 # configs.load_strict=True \
 # configs.dataset_type="video" \
-# configs.upsample_gaussians=[16,16] \
+# configs.upsample_gaussians=[16],[64] \
 # trainer.limit_train_batches=1000 \
 # trainer.limit_val_batches=1000 \
 # callbacks.model_checkpoint.every_n_epochs=1 \

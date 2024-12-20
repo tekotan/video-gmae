@@ -128,7 +128,8 @@ class MaskedAutoencoderViT(nn.Module):
 
         self.linear_gaussian = nn.Linear(decoder_embed_dim, int(self.params_per_gaussian * self.scale_vocab), bias=False)
 
-        self.linear_deltas = nn.ModuleList([nn.Linear(decoder_embed_dim, int(self.params_per_gaussian * self.scale_vocab * upsample), bias=False) for upsample in np.cumprod(self.upsample_gaussians)])
+        self.linear_deltas = nn.ModuleList([nn.Linear(decoder_embed_dim + self.params_per_gaussian, \
+                                            int(self.params_per_gaussian * self.scale_vocab * upsample), bias=False) for upsample in self.upsample_gaussians])
 
         self.initialize_weights()
 
@@ -259,9 +260,10 @@ class MaskedAutoencoderViT(nn.Module):
             x_ = blk(x_)
         x_ = self.decoder_norm(x_)
         x_points = self.linear_gaussian(x_[:, -self.number_of_frames*self.num_points:])
-
         for linear_delta in self.linear_deltas:
-            x_delta = linear_delta(x_[:, -self.number_of_frames*self.num_points:]).reshape(x_points.shape[0], x_points.shape[1], -1)
+            up_factor_feats = x_points.shape[1] // (self.number_of_frames*self.num_points)
+            delta_feats = torch.cat([x_[:, -self.number_of_frames*self.num_points:].repeat_interleave(up_factor_feats, axis=1), x_points], axis=-1)
+            x_delta = linear_delta(delta_feats)
             x_points_list = []  
             for j in range(x_delta.shape[-1]//x_points.shape[-1]):
                 x_points_ = x_points + x_delta[:, :, j*x_points.shape[-1]:(j+1)*x_points.shape[-1]]
