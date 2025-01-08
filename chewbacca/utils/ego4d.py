@@ -8,7 +8,7 @@ from random import shuffle
 
 os.makedirs("data", exist_ok=True)
 root_path = sys.argv[1] # root_path = "/datasets01/Ego4D/072522/"
-videos = glob.glob(root_path + "/*.mp4")
+videos = glob.glob(root_path + "/*/*.mp4")
 shuffle(videos)
 
 
