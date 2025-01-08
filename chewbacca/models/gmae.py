@@ -105,7 +105,11 @@ class GMAELitModule(LightningModule):
                                                                     deltas_reg_weight=self.cfg.deltas_reg_weight,
                                                                     random_frames=self.cfg.random_frames,
                                                                     mean_deltas=self.cfg.mean_deltas,
-                                                                    rgb_deltas=self.cfg.rgb_deltas
+                                                                    rgb_deltas=self.cfg.rgb_deltas,
+                                                                    rgb_deltas_scale=self.cfg.rgb_deltas_scale,
+                                                                    upsample_gaussians=self.cfg.upsample_gaussians,
+                                                                    spawning=self.cfg.spawning,
+                                                                    frame_zero=self.cfg.frame_zero
                                                                 )
             
         
@@ -363,7 +367,7 @@ class GMAELitModule(LightningModule):
                     else:
                         mask_ = (np.random.rand() + 1)/2
                 else:
-                    mask_ = 0.9
+                    mask_ = self.cfg.mask_ratio
                 latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=mask_)
                 if self.cfg.random_frames:
                     x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
@@ -376,7 +380,7 @@ class GMAELitModule(LightningModule):
 
 
                 # save the masked images and reconstructed images
-                if "save-images" in self.cfg.training_type and batch_idx<1 or self.cfg.inference.testing and batch_idx % 200 == 0:
+                if "save-images" in self.cfg.training_type and batch_idx<1 or self.cfg.inference.testing and batch_idx % 50 == 0:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                     # renormalize to 0,1

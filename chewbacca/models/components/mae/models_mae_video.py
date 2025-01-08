@@ -24,7 +24,7 @@ from timm.layers import DropPath, Mlp, PatchEmbed
 from timm.models.vision_transformer import (Attention, Block, LayerScale,
                                             PatchEmbed)
 
-from lart.models.components.mae.pos_embed import (get_2d_sincos_pos_embed,
+from chewbacca.models.components.mae.pos_embed import (get_2d_sincos_pos_embed,
                                                   get_3d_sincos_pos_embed,
                                                   get_1d_sincos_pos_embed_from_grid)
 
@@ -48,7 +48,8 @@ class MaskedAutoencoderViT(nn.Module):
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, 
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
-                 deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False):
+                 deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
+                 rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
@@ -56,12 +57,17 @@ class MaskedAutoencoderViT(nn.Module):
         self.random_frames = random_frames
         self.mean_deltas = mean_deltas
         self.rgb_deltas = rgb_deltas
+        self.rgb_deltas_scale = rgb_deltas_scale
+        self.upsample_gaussians = upsample_gaussians
+        self.spawning = spawning
+        self.frame_zero = frame_zero
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.number_of_frames = number_of_frames if not self.random_frames else 2
         self.total_frames = number_of_frames
+        self.input_frames = 1 if self.frame_zero else self.total_frames
         
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
@@ -69,7 +75,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.scale_vocab = int(scale_vocab)
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
         self.blocks = nn.ModuleList([
                 Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
@@ -120,7 +126,12 @@ class MaskedAutoencoderViT(nn.Module):
                 [0.0, 0.0, 0.0, 1.0],
             ], ],)
         self.decoder_pos_embed_gaussian = nn.Parameter(torch.rand(1, self.num_points*self.number_of_frames, decoder_embed_dim), requires_grad=True)  # learnable parameters
-        self.linear_gaussian = nn.Linear(decoder_embed_dim, int(14 * self.scale_vocab), bias=False)
+        self.params_per_gaussian = 30 if self.spawning else 14
+
+        self.linear_gaussian = nn.Linear(decoder_embed_dim, int(self.params_per_gaussian * self.scale_vocab), bias=False)
+
+        self.linear_deltas = nn.ModuleList([nn.Linear(decoder_embed_dim + self.params_per_gaussian, \
+                                            int(self.params_per_gaussian * self.scale_vocab * upsample), bias=False) for upsample in self.upsample_gaussians])
 
         self.initialize_weights()
 
@@ -128,7 +139,7 @@ class MaskedAutoencoderViT(nn.Module):
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
+        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
@@ -141,6 +152,10 @@ class MaskedAutoencoderViT(nn.Module):
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
         w = self.patch_embed.proj.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+        # initialize gaussian deltas to 0
+        for delta in self.linear_deltas:
+            torch.nn.init.constant_(delta.weight, 0)
 
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         torch.nn.init.normal_(self.cls_token, std=.02)
@@ -216,17 +231,23 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_encoder(self, x, mask_ratio):
         # embed patches
-        x_ = []
-        for a in range(x.shape[2]):
-            x_.append(self.patch_embed(x[:, :, a, :, :]))
-        x_ = torch.stack(x_, dim=1)[:, :self.total_frames]
-        x_ = rearrange(x_, 'n t c d -> n (t c) d')
+        if self.frame_zero:
+            # only take in frame 0
+            # normal behavior
+            x_ = self.patch_embed(x[:, :, 0, :, :])
+        else:
+            x_ = []
+            for a in range(x.shape[2]):
+                x_.append(self.patch_embed(x[:, :, a, :, :]))
+            x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
+            x_ = rearrange(x_, 'n t c d -> n (t c) d')
 
         # add pos embed w/o cls token
         x = x_ + self.pos_embed
 
         # masking: length -> length * mask_ratio
         x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        
 
         # apply Transformer blocks
         latents = []
@@ -247,15 +268,19 @@ class MaskedAutoencoderViT(nn.Module):
             x_ = blk(x_)
         x_ = self.decoder_norm(x_)
         x_points = self.linear_gaussian(x_[:, -self.number_of_frames*self.num_points:])
-
+        for linear_delta in self.linear_deltas:
+            up_factor_feats = x_points.shape[1] // (self.number_of_frames*self.num_points)
+            delta_feats = torch.cat([x_[:, -self.number_of_frames*self.num_points:].repeat_interleave(up_factor_feats, axis=1), x_points], axis=-1)
+            x_delta = linear_delta(delta_feats)
+            x_points_list = []  
+            for j in range(x_delta.shape[-1]//x_points.shape[-1]):
+                x_points_ = x_points + x_delta[:, :, j*x_points.shape[-1]:(j+1)*x_points.shape[-1]]
+                x_points_list.append(x_points_)
+            x_points = torch.cat(x_points_list, dim=1)
+        
         return x_points
 
     def forward_decoder(self, x, ids_restore, limit_gaussian=-1, frame_num=None):
-        if limit_gaussian > 0:
-            limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
-        else:
-            limit_gaussian = int(self.num_points * self.scale_vocab)
-
         x_ = self.decoder_embed(x)
         # choose pos embed for only the encoded patches
         ids_shuffle = torch.argsort(ids_restore, dim=1)
@@ -272,18 +297,18 @@ class MaskedAutoencoderViT(nn.Module):
 
         if self.scale_vocab > 1:
             reshape_frames = self.number_of_frames
-            x_points = x_points.reshape(x_points.shape[0], reshape_frames, self.num_points, self.scale_vocab, 14)
+            x_points = x_points.reshape(x_points.shape[0], reshape_frames, self.num_points * np.prod(self.upsample_gaussians), self.scale_vocab, 14)
             x_points = x_points.permute(0, 1, 3, 2, 4)
-            x_points = x_points.reshape(x_points.shape[0], reshape_frames * self.scale_vocab * self.num_points, 14)
+            x_points = x_points.reshape(x_points.shape[0], reshape_frames * self.scale_vocab * self.num_points * np.prod(self.upsample_gaussians), 14)
         if self.random_frames and not frame_num:
             return x_points, random_frame
         return x_points
     
     def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False, return_corres=False):
         if limit_gaussian > 0:
-            limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab))
+            limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab * np.prod(self.upsample_gaussians)))
         else:
-            limit_gaussian = int(self.num_points * self.scale_vocab)
+            limit_gaussian = int(self.num_points * self.scale_vocab * np.prod(self.upsample_gaussians))
 
         device = x_points.device
         dtype = x_points.dtype
@@ -305,7 +330,6 @@ class MaskedAutoencoderViT(nn.Module):
 
         rgbs = x_points[:, :, 10:13]
         opacities = x_points[:, :, 13:14]
-
 
         self.viewmat = self.viewmat.to(dtype=dtype).to(device=device)
         self.Ks = self.Ks.to(dtype=dtype).to(device=device)
@@ -385,7 +409,14 @@ class MaskedAutoencoderViT(nn.Module):
 
                 if self.rgb_deltas:
                     rgbs_delta = rgbs[i][j*limit_gaussian:(j+1)*limit_gaussian].unsqueeze(0)
-                    rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0) + rgbs_delta
+                    if self.rgb_deltas_scale != 1:
+                        rgbs_ = torch.sigmoid(rgbs[i][:limit_gaussian].unsqueeze(0)) + torch.sigmoid(rgbs_delta) * self.rgb_deltas_scale
+                        rgbs_ = torch.clamp(rgbs_, 0, 1)
+                    else:
+                        rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0) + rgbs_delta
+                        rgbs_ = torch.sigmoid(rgbs_)
+                else:
+                    rgbs_ = torch.sigmoid(rgbs_)
                 
                 # opacities_ = opacities[i][j*limit_gaussian:(j+1)*limit_gaussian]
                 # opacities_ = opacities_.view(1, -1)
@@ -407,7 +438,7 @@ class MaskedAutoencoderViT(nn.Module):
                 tile_height = math.ceil(self.H / float(self.tile_size))
                 tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
                 isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
-                render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
+                render_colors, render_alphas = rasterize_to_pixels(xys, conics, rgbs_, torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
                 out_img = render_colors * render_alphas + (1.0 - render_alphas)
                 out_img = out_img.squeeze()
                 images_per_video.append(out_img)
@@ -449,7 +480,7 @@ class MaskedAutoencoderViT(nn.Module):
         next_imgs = torch.cat(next_imgs, axis=1)
         imgs_ = torch.cat([init_imgs, next_imgs], axis=1)
 
-        if return_corres:
+        if return_corres and limit_gaussian_z < 0:
 
             gaussian_centers = torch.stack(gaussian_centers)
             init_gaussians = gaussian_centers[:, ::2].mean(axis=0, keepdim=True)
@@ -461,8 +492,9 @@ class MaskedAutoencoderViT(nn.Module):
             for batch in range(imgs_.shape[0]):
                 gaussian_mapping = None
                 img_hist = []
-                gauss_indices = ((torch.logical_and(dists[batch] < (self.H * 0.1), dists[batch] > (self.H * 0.01))).sum(dim=0) > 25).nonzero(as_tuple=True)
-                # gauss_indices = (dists[batch] < (self.H * 0.3)).all(dim=0).nonzero(as_tuple=True)
+                gauss_indices = torch.logical_and(dists[batch] < 20, (dists[batch] > 2).sum(dim=0) > 15).all(dim=0).nonzero(as_tuple=True)
+                # gauss_indices = ((gaussians[batch] > 25) & (gaussians[batch] < 75)).all(dim=0).nonzero(as_tuple=True)
+                # gauss_indices = ((dists[batch] > 1).sum(dim=0) > 5).nonzero(as_tuple=True)
                 for idx in range(imgs_.shape[1]):
                     img, mapping = self.plot_correspondences(gaussians[batch, idx, gauss_indices[0]], imgs_[batch, idx], mapping=gaussian_mapping, history=img_hist)
                     imgs_[batch, idx] = img

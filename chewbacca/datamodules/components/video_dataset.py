@@ -8,7 +8,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 import joblib
-from lart.utils import get_pylogger
+from chewbacca.utils import get_pylogger
 from typing import Any
 
 
