@@ -272,7 +272,7 @@ class MaskedAutoencoderViT(nn.Module):
             up_factor_feats = x_points.shape[1] // (self.number_of_frames*self.num_points)
             delta_feats = torch.cat([x_[:, -self.number_of_frames*self.num_points:].repeat_interleave(up_factor_feats, axis=1), x_points], axis=-1)
             x_delta = linear_delta(delta_feats)
-            x_points_list = []  
+            x_points_list = []
             for j in range(x_delta.shape[-1]//x_points.shape[-1]):
                 x_points_ = x_points + x_delta[:, :, j*x_points.shape[-1]:(j+1)*x_points.shape[-1]]
                 x_points_list.append(x_points_)
