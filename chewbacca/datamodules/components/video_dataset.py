@@ -143,6 +143,6 @@ class VideoDataset(Dataset):
             arr_seq = arr_seq[:, 0, :, :]
 
         if(self.flip_rgb):
-            arr_seq = arr_seq[::-1, 0, :, :]
+            arr_seq = arr_seq[:, :, :, :].flip(dims=(0))
 
         return arr_seq, video_label, -1, video_idx
