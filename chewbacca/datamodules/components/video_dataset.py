@@ -42,13 +42,14 @@ def pil_loader(path: str) -> Image.Image:
 
 
 class VideoDataset(Dataset):
-    def __init__(self, cfg, video_paths, train=True):
+    def __init__(self, cfg, video_paths, train=True, flip_rgb=False):
         super().__init__()
         self.cfg = cfg
         self.train = train
         # video paths is list of videos and labels
         self.video_paths = video_paths
         self.good_videos = []
+        self.flip_rgb = flip_rgb
 
         logger.info(f"Number of videos: {len(self.video_paths)}")
 
@@ -140,5 +141,8 @@ class VideoDataset(Dataset):
 
         if(self.cfg.seq_length == 1):
             arr_seq = arr_seq[:, 0, :, :]
+
+        if(self.flip_rgb):
+            arr_seq = arr_seq[::-1, 0, :, :]
 
         return arr_seq, video_label, -1, video_idx
