@@ -260,3 +260,6 @@ configs:
         testing: False
         depth: False
         correspondences: False
+    finetune_params:
+        reuse_decoder: False
+        num_fourier_features: 0

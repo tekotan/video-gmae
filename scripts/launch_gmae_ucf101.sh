@@ -15,7 +15,7 @@ configs.input_size=112 \
 configs.lr=1e-3 \
 configs.weight_decay=5e-2 \
 trainer.accumulate_grad_batches=1 \
-configs.train_batch_size=2 \
+configs.train_batch_size=4 \
 configs.test_batch_size=4 \
 configs.train_num_workers=8 \
 configs.test_num_workers=8 \
@@ -27,18 +27,16 @@ trainer.max_epochs=800 \
 configs.seq_length=32 \
 configs.deltas_reg_weight=0.0 \
 configs.random_frames=True \
-configs.rgb_deltas=False \
+configs.rgb_deltas=True \
 configs.mean_deltas=True \
 configs.num_classes=200 \
 configs.dataset_type="video" \
-trainer.limit_train_batches=1000000 \
-trainer.limit_val_batches=1000000 \
+trainer.limit_train_batches=5000 \
+trainer.limit_val_batches=1000 \
 callbacks.model_checkpoint.every_n_epochs=1 \
 configs.training_type="ucf101_gaussian_save-images-z_no-mask_random-frames" \
 configs.load_strict=False \
-configs.mask_ratio=0.0 \
-configs.frame_zero=True
-
+configs.mask_ratio=0.0
 # configs.rgb_deltas_scale=0.05,0.1,0.25 \
 
 

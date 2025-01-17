@@ -94,7 +94,7 @@ class GMAELitModule(LightningModule):
                                                                     )
                 
         else:
-            import chewbacca.models.components.mae.models_mae_video as models_mae
+            import chewbacca.models.components.mae.models_mae_finetune as models_mae
             self.encoder = models_mae.__dict__[self.cfg.model_name](
                                                                     norm_pix_loss=True,
                                                                     img_size=self.cfg.input_size,
