@@ -55,6 +55,77 @@ def gpu_mem_usage():
     return mem_usage_bytes / 1024 / 1024
 
 
+def calculate_iou(boxes1, boxes2):
+    """Calculate IoU between two sets of boxes"""
+    # boxes are in format [xmin, xmax, ymin, ymax]
+    x1 = torch.max(boxes1[..., 0], boxes2[..., 0])
+    y1 = torch.max(boxes1[..., 2], boxes2[..., 2])
+    x2 = torch.min(boxes1[..., 1], boxes2[..., 1])
+    y2 = torch.min(boxes1[..., 3], boxes2[..., 3])
+
+    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+    boxes1_area = (boxes1[..., 1] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 2])
+    boxes2_area = (boxes2[..., 1] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 2])
+    union = boxes1_area + boxes2_area - intersection
+
+    iou = intersection / (union + 1e-6)
+    return iou
+
+class AverageJaccard(torch.nn.Module):
+    def __init__(self, thresholds=[1, 2, 4, 8, 16]):
+        super().__init__()
+        self.thresholds = thresholds
+        self.reset()
+
+    def reset(self):
+        self.total_jaccard = 0
+        self.count = 0
+
+    def compute(self):
+        return self.total_jaccard / (self.count if self.count > 0 else 1)
+
+    def update(self, pred_points, pred_visible, true_points, true_visible):
+        batch_size = pred_points.shape[0]
+
+        for batch_idx in range(batch_size):
+            jaccard_sum = 0
+
+            for threshold in self.thresholds:
+                # Calculate distances between predicted and ground truth points
+                distances = torch.norm(
+                    pred_points[batch_idx].unsqueeze(1) - true_points[batch_idx].unsqueeze(0),
+                    dim=-1
+                )
+
+                # Points within threshold distance
+                within_threshold = distances <= threshold
+
+                # True positives: predicted visible points that are within threshold of visible ground truth points
+                true_positives = torch.sum(
+                    (pred_visible[batch_idx].unsqueeze(1) & true_visible[batch_idx].unsqueeze(0) & within_threshold).float()
+                )
+
+                # False positives: predicted visible points that are either farther than threshold or ground truth is occluded
+                false_positives = torch.sum(
+                    pred_visible[batch_idx] & ~torch.any(within_threshold & true_visible[batch_idx].unsqueeze(0), dim=1)
+                )
+
+                # False negatives: ground truth visible points that are predicted occluded or farther than threshold
+                false_negatives = torch.sum(
+                    true_visible[batch_idx] & ~torch.any(within_threshold & pred_visible[batch_idx].unsqueeze(1), dim=0)
+                )
+
+                # Calculate Jaccard
+                denominator = true_positives + false_positives + false_negatives
+                jaccard = true_positives / (denominator + 1e-6)
+                jaccard_sum += jaccard
+
+            # Average over thresholds
+            self.total_jaccard += jaccard_sum / len(self.thresholds)
+            self.count += 1
+
+
+
 class FinetuneLitModule(LightningModule):
     """
     Lightning module for training GPT models.
@@ -75,22 +146,26 @@ class FinetuneLitModule(LightningModule):
         self.num_frames = self.cfg.seq_length
 
         if "point-tracking" in self.cfg.training_type:
-            self.mode = "tracking"
+            self.mode = "point-tracking"
         else:
             raise ValueError("Must specify finetuning task")
-            
+
         import chewbacca.models.components.mae.models_mae_finetune as models_mae
         self.encoder = models_mae.__dict__[self.cfg.model_name](
                                                                 mode=self.mode,
                                                                 norm_pix_loss=True,
-                                                                num_gaussian=self.cfg.vocab_size,
+                                                                num_tracks=self.cfg.finetune_params.tracks_to_sample,
                                                                 img_size=self.cfg.input_size,
                                                                 number_of_frames=self.num_frames,
                                                                 reuse_decoder=self.cfg.finetune_params.reuse_decoder,
                                                                 num_fourier_features=self.cfg.finetune_params.num_fourier_features,
+                                                                batch_prediction=self.cfg.finetune_params.batch_prediction,
+                                                                new_readout_mode=self.cfg.finetune_params.new_readout_mode,
                                                             )
-            
-        
+        if self.cfg.inference.testing:
+            self.encoder.requires_grad = False
+
+
         num_hidden_layers = len(self.encoder.blocks)
         hsize = self.encoder.patch_embed.proj.weight.shape[0]
 
@@ -106,13 +181,19 @@ class FinetuneLitModule(LightningModule):
         self.val_acc = nn.ModuleList([Accuracy(task="multiclass", num_classes=self.cfg.num_classes) for i in range(num_hidden_layers)])
         self.test_mse = MeanSquaredError()
 
+        # Add Average Jaccard metric
+        if self.mode == "object-tracking":
+            self.box_mse = MeanSquaredError()
+            self.box_iou = MeanMetric()  # For tracking mean IoU
+        elif self.mode == "point-tracking":
+            self.average_jaccard = AverageJaccard()
+
         # create folders for storing results
         os.makedirs(self.cfg.storage_folder + "/results/", exist_ok=True)
         os.makedirs(self.cfg.storage_folder + "/tests/", exist_ok=True)
         os.makedirs(self.cfg.storage_folder + "/videos/", exist_ok=True)
         log.info("Storage folder : " + self.cfg.storage_folder)
 
-  
     def forward_loss(self, true, pred, additional_data=None):
         """
         imgs: [N, 3, H, W]
@@ -123,10 +204,10 @@ class FinetuneLitModule(LightningModule):
         count = 0
         for i in range(pred[0].shape[0]):
             # if(torch.sum(pred[i])>0):
-            if self.mode == "tracking":
+            if self.mode == "point-tracking":
                 tracks_true, occluded_true = true
                 tracks_pred, occluded_pred = pred
-                
+
                 first_invalid_index = torch.where(additional_data[i, :, 0] == -1)[0]
                 if len(first_invalid_index) == 0:
                     first_invalid_index = tracks_pred.shape[1]
@@ -139,18 +220,24 @@ class FinetuneLitModule(LightningModule):
                 active_tracks_true = tracks_true[i, :first_invalid_index]
                 active_occluded_true = occluded_true[i, :first_invalid_index]
 
-                loss += torch.nn.functional.mse_loss(active_tracks_true, active_tracks_pred)
-                loss += torch.nn.functional.binary_cross_entropy(active_occluded_pred.float(), active_occluded_true.float())
+                # Position loss using Huber loss instead of MSE
+                loss += torch.nn.functional.huber_loss(active_tracks_true, active_tracks_pred) * 100
+                loss += torch.nn.functional.binary_cross_entropy(active_occluded_pred.float(), active_occluded_true.float()) * 0.1
+            elif self.mode == "object-tracking":
+                target_boxes, pred_boxes = true, pred
+                # Calculate box regression loss
+                loss += F.smooth_l1_loss(pred_boxes, target_boxes, beta=1.0)
+                return loss
             count += 1
         return loss
 
     def step(self, batch: Any, batch_idx: int, return_images=False):
+        import ipdb; ipdb.set_trace()
         video = batch[0] # bs, 3, t, h, w
-        query_points = batch[1]
-        target_points = batch[2] # dataset index
-        occluded_points = batch[3]
-        device = video.device
-        dtype = video.dtype
+        init_queries = batch[1]
+        finetune_target = batch[2] # dataset index
+        if self.mode == "point-tracking":
+            occluded_points = batch[3]
 
         if "rand-mask" in self.cfg.training_type:
             p_ = np.random.rand()
@@ -160,53 +247,97 @@ class FinetuneLitModule(LightningModule):
                 mask_ = (np.random.rand() + 1)/2
         else:
             mask_ = self.cfg.mask_ratio
-
         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=mask_)
+        if self.mode == "point-tracking":
+            if self.cfg.finetune_params.batch_prediction:
+                x_points, occlusions_pred = self.encoder.forward_decoder(latent, ids_restore, init_queries) # B x 256 x T x 2
+            else:
+                batch_x_points = []
+                batch_occluded = []
+                for i in range(latent.shape[0]):
+                    x_points_ = []
+                    occluded_ = []
+                    for j in range(0, init_queries.shape[1], latent.shape[0]):
+                        flat_init_queries = init_queries[i, j:j+latent.shape[0]].view(-1, 1, 3)
+                        num_points = flat_init_queries.shape[0]
+                        x_points, occluded = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), flat_init_queries) # B x 256 x T x 2
+                        x_points_.append(x_points)
+                        occluded_.append(occluded)
 
-        x_points, occluded = self.encoder.forward_decoder(latent, ids_restore, query_points) # B x 256 x T x 2
-        
-        loss = self.forward_loss((target_points, occluded_points), (x_points, occluded), additional_data=query_points)
+                    x_points = torch.cat(x_points_, dim=0)
+                    occluded = torch.cat(occluded_, dim=0)
+                    batch_x_points.append(x_points)
+                    batch_occluded.append(occluded)
+
+                x_points = torch.stack(batch_x_points, dim=0).squeeze(2)
+                occlusions_pred = torch.stack(batch_occluded, dim=0).squeeze(2)
+            loss = self.forward_loss((finetune_target, occluded_points), (x_points, occlusions_pred), additional_data=init_queries)
+        elif self.mode == "object-tracking":
+            if self.cfg.finetune_params.batch_prediction:
+                box_pred = self.encoder.forward_decoder(latent, ids_restore, init_queries) # B x 256 x T x 2
+            else:
+                batch_box_pred = []
+                for i in range(latent.shape[0]):
+                    box_pred_ = []
+                    occlusions_pred_ = []
+                    for j in range(0, init_queries.shape[1], latent.shape[0]):
+                        flat_init_queries = init_queries[i, j:j+latent.shape[0]].view(-1, 1, 3)
+                        num_points = flat_init_queries.shape[0]
+                        box_pred = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), flat_init_queries) # B x 256 x T x 2
+                        box_pred_.append(box_pred)
+
+                    box_pred = torch.cat(box_pred_, dim=0)
+                    batch_box_pred.append(box_pred)
+
+                box_pred = torch.stack(batch_box_pred, dim=0).squeeze(2)
+            loss = self.forward_loss(finetune_target, box_pred, additional_data=init_queries)
+
         # save the masked images and reconstructed images
         if "save-images" in self.cfg.training_type and batch_idx<1 or self.cfg.inference.testing:
-            if "no-mask" in self.cfg.training_type:
-                latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
-            x_points, occlusions_pred = self.encoder.forward_decoder(latent, ids_restore, query_points) # B x 256 x T x 2
-            # renormalize to 0,1
-            imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
-            imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
-            imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
-            imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
+            with torch.no_grad():
+                if "no-mask" in self.cfg.training_type:
+                    latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
+                if self.mode == "point-tracking":
+                    if self.cfg.finetune_params.batch_prediction:
+                        x_points, occlusions_pred = self.encoder.forward_decoder(latent, ids_restore, init_queries) # B x 256 x T x 2
+                    else:
+                        batch_x_points = []
+                        batch_occlusions_pred = []
+                        for i in range(latent.shape[0]):
+                            x_points_ = []
+                            occlusions_pred_ = []
+                            for j in range(0, init_queries.shape[1], latent.shape[0]):
+                                flat_init_queries = init_queries[i, j:j+latent.shape[0]].view(-1, 1, 3)
+                                num_points = flat_init_queries.shape[0]
+                                x_points, occlusions_pred = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), flat_init_queries) # B x 256 x T x 2
+                                x_points_.append(x_points)
+                                occlusions_pred_.append(occlusions_pred)
 
-            scale_factor = np.array([self.cfg.input_size, self.cfg.input_size])[np.newaxis, np.newaxis, :]
-            
-            final_image_ = []
-            for i in range(len(x_points)):
-                first_invalid_index = torch.where(query_points[i, :, 0] == -1)[0]
-                if len(first_invalid_index) == 0:
-                    first_invalid_index = x_points.shape[1]
-                else:
-                    first_invalid_index = first_invalid_index[0]
+                            x_points = torch.cat(x_points_, dim=0)
+                            occlusions_pred = torch.cat(occlusions_pred_, dim=0)
+                            batch_x_points.append(x_points)
+                            batch_occlusions_pred.append(occlusions_pred)
 
-                active_tracks_pred = x_points[i, :first_invalid_index].detach().cpu().numpy()
-                active_tracks_true = target_points[i, :first_invalid_index].detach().cpu().numpy()
+                        x_points = torch.stack(batch_x_points, dim=0).squeeze(2)
+                        occlusions_pred = torch.stack(batch_occlusions_pred, dim=0).squeeze(2)
+                        final_image_ = self.visualize_point_tracking(video, x_points, init_queries, finetune_target, occluded_points, occlusions_pred)
+                elif self.mode == "object-tracking":
+                    batch_box_pred = []
+                    for i in range(latent.shape[0]):
+                        box_pred_ = []
+                        occlusions_pred_ = []
+                        for j in range(0, init_queries.shape[1], latent.shape[0]):
+                            flat_init_queries = init_queries[i, j:j+latent.shape[0]].view(-1, 1, 3)
+                            num_points = flat_init_queries.shape[0]
+                            box_pred = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), flat_init_queries) # B x 256 x T x 2
+                            box_pred_.append(box_pred)
 
-                active_occluded_points = occluded_points[i, :first_invalid_index].detach().cpu().numpy()
-                active_occlusions_pred = occlusions_pred[i, :first_invalid_index].detach().cpu().numpy()
-                
-                painted_frames_pred = tapvid_viz_utils.paint_point_track(
-                    imgs[i],
-                    active_tracks_pred * scale_factor,
-                    ~(active_occlusions_pred > 0.5),
-                )
-                
-                painted_frames_true = tapvid_viz_utils.paint_point_track(
-                    imgs[i],
-                    active_tracks_true * scale_factor,
-                    ~(active_occluded_points > 0.5),
-                )
+                        box_pred = torch.cat(box_pred_, dim=0)
+                        batch_box_pred.append(box_pred)
 
-                final_image = np.concatenate([painted_frames_true, painted_frames_pred], axis=2)
-                final_image_.append(final_image)
+                    box_pred = torch.stack(batch_box_pred, dim=0).squeeze(2)
+                    final_image_ = self.visualize_object_tracking(video, box_pred, finetune_target, batch_idx)
+
             final_image_ = np.concatenate(final_image_, axis=1)
             final_image_ = [frame for frame in final_image_]
             # save final image with epoch and batch index
@@ -217,9 +348,9 @@ class FinetuneLitModule(LightningModule):
                 # make video with final_image_a, final_image_b using moviepy
                 clip = ImageSequenceClip(final_image_, fps=1).resize(2)  # fps can be adjusted to your need
                 clip.write_videofile(f"{self.cfg.storage_folder}/results/{train_}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
-            
+
             if self.cfg.inference.testing:
-                title = "depth" if self.cfg.inference.depth else "corr" if  self.cfg.inference.correspondences else "test"
+                title = "tapvid" if "eval" in self.cfg.training_type else "kubric"
                 clip = ImageSequenceClip(final_image_, fps=1).resize(2)  # fps can be adjusted to your need
                 clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
@@ -229,31 +360,94 @@ class FinetuneLitModule(LightningModule):
         loss_dict  = {"loss": loss}
 
         # track loss at each token position
-        extras_    = {"x_points": x_points} #{"loss_index": loss_index.mean(dim=0)}
+        if self.mode == "point-tracking":
+            extras_    = {"x_points": x_points, "occluded_pred": occlusions_pred} #{"loss_index": loss_index.mean(dim=0)}
+        elif self.mode == "object-tracking":
+            extras_    = {"box_pred": box_pred}
+        else:
+            extras_    = {}
         logits_    = {}
-
-        # for linear probeing: for k400
-        # logits_cls = []
-        # # for linear probe
-        # labels_ = batch[1]
-        # for i in range(len(latent_layers)):
-        #     cls_token = latent_layers[i].mean(1)
-        #     logits__ = self.linear_layer[i](cls_token.detach())
-        #     if torch.sum(labels!=-1)>0:
-        #         if "cls-label-smooth" in self.cfg.training_type:
-        #             value_ = float(self.cfg.training_type.split("cls-label-smooth")[1].split("_")[0])
-        #             loss_cls = F.cross_entropy(logits__[labels!=-1], labels[labels!=-1].to(device=device), label_smoothing=value_)
-        #         else:
-        #             loss_cls = F.cross_entropy(logits__[labels!=-1], labels[labels!=-1].to(device=device))
-        #         loss_dict["loss_cls_" + str(i)] = loss_cls
-        #         logits_cls.append(logits__)
-        #     else:
-        #         loss_dict["loss_cls_" + str(i)] = torch.tensor(0).to(device=device).to(dtype=dtype)
-        #         logits_cls.append([])
-        # logits_["logits_cls"] = logits_cls
 
         return loss_dict, extras_, logits_
 
+    def visualize_object_tracking(self, video, pred_boxes, target_boxes, batch_idx):
+        """Visualize object tracking predictions"""
+        # Denormalize video
+        imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=video.device).to(dtype=video.dtype)
+        imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=video.device).to(dtype=video.dtype)
+        imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
+        imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
+
+        final_images = []
+        for b in range(len(imgs)):
+            sequence = []
+            for t in range(len(imgs[b])):
+                frame = imgs[b][t].copy()
+
+                # Draw predicted boxes
+                for box in pred_boxes[b, :, t].cpu().numpy():
+                    xmin, xmax, ymin, ymax = box * self.cfg.input_size  # Scale to image size
+                    cv2.rectangle(frame,
+                                (int(xmin), int(ymin)),
+                                (int(xmax), int(ymax)),
+                                (0, 255, 0), 2)  # Green for predictions
+
+                # Draw ground truth boxes
+                for box in target_boxes[b, :, t].cpu().numpy():
+                    xmin, xmax, ymin, ymax = box * self.cfg.input_size
+                    cv2.rectangle(frame,
+                                (int(xmin), int(ymin)),
+                                (int(xmax), int(ymax)),
+                                (255, 0, 0), 2)  # Red for ground truth
+
+                sequence.append(frame)
+
+            final_images.extend(sequence)
+        return final_images
+    def visualize_point_tracking(self, video, x_points, query_points, target_points, occluded_points, occlusions_pred):
+        # renormalize to 0,1
+        imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=video.device).to(dtype=video.dtype)
+        imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=video.device).to(dtype=video.dtype)
+        imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
+        imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
+
+        scale_factor = np.array([self.cfg.input_size, self.cfg.input_size])[np.newaxis, np.newaxis, :]
+
+        final_image_ = []
+        for i in range(len(x_points)):
+            first_invalid_index = torch.where(query_points[i, :, 0] == -1)[0]
+            if len(first_invalid_index) == 0:
+                first_invalid_index = x_points.shape[1]
+            else:
+                first_invalid_index = first_invalid_index[0]
+
+            active_tracks_pred = x_points[i, :first_invalid_index].detach().cpu().numpy()
+            active_tracks_true = target_points[i, :first_invalid_index].detach().cpu().numpy()
+
+            active_occluded_points = occluded_points[i, :first_invalid_index].detach().cpu().numpy()
+            active_occlusions_pred = occlusions_pred[i, :first_invalid_index].detach().cpu().numpy()
+
+            painted_frames_pred = tapvid_viz_utils.paint_point_track(
+                imgs[i],
+                active_tracks_pred * scale_factor,
+                ~(active_occlusions_pred > 0.5),
+            )
+
+            painted_frames_true = tapvid_viz_utils.paint_point_track(
+                imgs[i],
+                active_tracks_true * scale_factor,
+                ~(active_occluded_points > 0.5),
+            )
+
+            painted_frames_blank = tapvid_viz_utils.paint_point_track(
+                np.ones_like(imgs[i]) * 255,
+                active_tracks_pred * scale_factor,
+                ~(active_occlusions_pred > 0.5),
+            )
+
+            final_image = np.concatenate([painted_frames_true, painted_frames_pred, painted_frames_blank], axis=2)
+            final_image_.append(final_image)
+        return final_image_
     def on_train_epoch_start(self) -> None:
         torch.cuda.empty_cache()
 
@@ -266,7 +460,7 @@ class FinetuneLitModule(LightningModule):
         self.train_loss(loss.item())
         for key in loss_dict.keys():
             self.log("train/loss/" + key, loss_dict[key].item(), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-            
+
 
         # for linear probe accuracy on imagenet and k400
         if("logits_cls" in logits_cls.keys()):
@@ -293,21 +487,44 @@ class FinetuneLitModule(LightningModule):
         if(self.cfg.promt):
             self.generate(batch, batch_idx)
             return {"loss": 0}
-        if self.mode == "tracking":
+        if self.mode == "point-tracking":
             loss_dict, extra, logits_cls = self.step(batch, batch_idx, return_images=False)
-            
+
             query_points = batch[1]
             target_points = batch[2]
+            occluded = batch[3]
             filtered_x_points = extra["x_points"]
             filtered_x_points[query_points[:, :, 0] == -1] = 0
             self.test_mse.update(target_points.contiguous(), filtered_x_points.contiguous())
-            
+
+            # Update Jaccard metric
+            pred_points = filtered_x_points
+            pred_visible = ~(extra.get("occluded_pred", torch.zeros_like(query_points[:,:,0])) > 0.5)
+            true_points = target_points
+            true_visible = ~(occluded>0.5)  # Assuming batch[3] contains occlusion information
+            self.average_jaccard.update(pred_points, pred_visible, true_points, true_visible)
+        if self.mode == "object-tracking":
+            loss_dict, extra, logits_cls = self.step(batch, batch_idx, return_images=False)
+
+            target_boxes = batch[2]
+            pred_boxes = extra["box_pred"]
+            self.box_mse.update(target_boxes.contiguous(), pred_boxes.contiguous())
+
+            # Update IoU metric
+            iou = calculate_iou(target_boxes, pred_boxes)
+            self.box_iou.update(iou)
+
         loss = sum([v for k,v in loss_dict.items()])
 
         # update and log metrics
         self.val_loss(loss.item())
         for key in loss_dict.keys():
             self.log("val/loss/" + key, loss_dict[key].item(), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
+        # Log Jaccard metric
+        if self.mode == "point-tracking":
+            jaccard_score = self.average_jaccard.compute()
+            self.log("val/jaccard", jaccard_score, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
         # for linear probe accuracy on imagenet and k400
         if("logits_cls" in logits_cls.keys()):
@@ -321,13 +538,12 @@ class FinetuneLitModule(LightningModule):
         # deleting tensors
         del loss_dict, batch
 
-
         return {"loss": loss}
 
     def on_validation_epoch_end(self):
         log.info("\n " + self.cfg.storage_folder +  " : Validation epoch " + str(self.current_epoch) + " ended.")
 
-        if self.mode == "tracking":
+        if self.mode == "point-tracking":
 
             total_mse = self.test_mse.compute()
             self.log(f"mse", total_mse, sync_dist=True)
@@ -336,6 +552,18 @@ class FinetuneLitModule(LightningModule):
             self.val_loss.reset()
             self.train_loss.reset()
             self.test_mse.reset()
+        elif self.mode == "object-tracking":
+            total_mse = self.box_mse.compute()
+            self.log(f"mse", total_mse, sync_dist=True)
+
+            total_iou = self.box_iou.compute()
+            self.log(f"iou", total_iou, sync_dist=True)
+
+            # reset the metric
+            self.val_loss.reset()
+            self.train_loss.reset()
+            self.box_mse.reset()
+            self.box_iou.reset()
 
         # for linear probe accuracy on imagenet and k400, compute and log the accuracy
         if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type):
@@ -346,7 +574,10 @@ class FinetuneLitModule(LightningModule):
                 self.val_acc[i].reset()
                 self.train_acc[i].reset()
 
+            log.info("Jaccard Score : " + str(self.average_jaccard.compute().item()))
+
         # reset the metric
+        self.average_jaccard.reset()
         self.val_loss.reset()
         self.train_loss.reset()
 
@@ -386,7 +617,6 @@ class FinetuneLitModule(LightningModule):
     def configure_optimizers(self):
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
         Normally you'd need one. But in the case of GANs or similar you might have multiple.
-
         Examples:
             https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#configure-optimizers
         """

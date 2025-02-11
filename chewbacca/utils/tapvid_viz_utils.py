@@ -29,6 +29,10 @@ import numpy as np
 # Generate random colormaps for visualizing different points.
 def get_colors(num_colors: int) -> List[Tuple[int, int, int]]:
   """Gets colormap for points."""
+  if num_colors == 0:
+    return []
+    
+  np.random.seed(42)
   colors = []
   for i in np.arange(0.0, 360.0, 360.0 / num_colors):
     hue = i / 360.0
@@ -38,6 +42,7 @@ def get_colors(num_colors: int) -> List[Tuple[int, int, int]]:
     colors.append(
         (int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
     )
+  random.seed(42)
   random.shuffle(colors)
   return colors
 

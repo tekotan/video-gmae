@@ -9,7 +9,7 @@ defaults:
 callbacks:
     model_checkpoint:
         _target_: lightning.pytorch.callbacks.ModelCheckpoint
-        # _target_: lart.utils.ema_checkpoint.EMACheckpoint    
+        # _target_: lart.utils.ema_checkpoint.EMACheckpoint
         dirpath: ${paths.output_dir}/checkpoints
         filename: "epoch_{epoch:03d}"
         monitor: "val/loss/loss"
@@ -36,14 +36,14 @@ callbacks:
         _target_: lightning.pytorch.callbacks.LearningRateMonitor
 
     timer:
-        _target_: lightning.pytorch.callbacks.Timer   
+        _target_: lightning.pytorch.callbacks.Timer
 
     ema:
         _target_: chewbacca.utils.ema.EMA
         decay: 0.999
         cpu_offload: False
         validate_original_weights: False
-        every_n_steps: 1  
+        every_n_steps: 1
 
 logger:
     tensorboard:
@@ -51,7 +51,7 @@ logger:
         save_dir: "${paths.output_dir}/tensorboard/"
         version: 0
 
-paths: 
+paths:
     root_dir: ${oc.env:PROJECT_ROOT}
     data_dir: ${paths.root_dir}/data/
     log_dir: ${paths.root_dir}/logs/
@@ -71,8 +71,6 @@ hydra:
 hydra_logging: colorlog
 job_logging: colorlog
 
-
-
 # task name, determines output directory path
 task_name: "1000"
 tags: ["dev"]
@@ -91,7 +89,6 @@ ckpt_path: null
 # seed for random number generators in pytorch, numpy and python.random
 seed: null
 
-
 datamodule:
     _target_: chewbacca.datamodules.mae_datamodule.MAEDataModule
     cfg: ${configs}
@@ -102,8 +99,6 @@ model:
     cfg: ${configs}
 
 configs:
-
-
     task: "pretrain" # pretrain, finetune
     model_name: "vgpt_base"
     tokenizer_name: "dvae-8k"
@@ -111,11 +106,9 @@ configs:
     input_size: 256
     patch_size: 8
 
-
-
     in1k_pix_ft_num_classes: 1000
     num_classes: 1000
-    
+
     return_full_image: False
     color_jitter: null
     aa: rand-m9-mstd0.5-inc1
@@ -177,7 +170,7 @@ configs:
     # gpt configs
     seq_length: 16
     sample_rate: 4
-    num_videos_render : 0
+    num_videos_render: 0
     depth: 12
     heads: 8
     dim: 512
@@ -186,11 +179,10 @@ configs:
     k400_ft_coff_1: 1
     in1k_ft_coff_1: 1
     in1k_pix_ft_coff_1: 1
-    
+
     use_xformer: False
     promt: False
     vqgan_type: "vqgan"
-
 
     layer_dropout: 0.0
     attn_dropout: 0.0
@@ -200,7 +192,7 @@ configs:
     ff_mult: 4
     use_alibi: False
     upsample_generation: False
-    
+
     finetune_layer: null
     feature_layer: null
     vit_backbone: False
@@ -219,10 +211,10 @@ configs:
     top_k: 40
     temperature: 1.0
     overfit: False
-    
+
     video_source: "ego4d"
     use_prob: True
-    
+
     save_attn: False
     generate_seq_len: 16
     generate_input_len: 4
@@ -267,7 +259,11 @@ configs:
         testing: False
         depth: False
         correspondences: False
-    
+
     finetune_params:
         reuse_decoder: False
         num_fourier_features: 0
+        batch_prediction: True
+        tracks_to_sample: 32
+        new_readout_mode: False
+        test: False

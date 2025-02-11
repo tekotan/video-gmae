@@ -9,6 +9,7 @@ import os
 def random_crop_4d(
     frames_4d: torch.Tensor,
     points_3d: np.ndarray,
+    occlusions: np.ndarray,
     crop_size: int
 ):
     """
@@ -52,12 +53,18 @@ def random_crop_4d(
     adjusted_points[:, :, 1] -= y_off
 
     # Now clamp them to [0, crop_size-1]
+    external_x = (adjusted_points[:, :, 0] < 0) | (adjusted_points[:, :, 0] >= crop_size)
+    external_y = (adjusted_points[:, :, 1] < 0) | (adjusted_points[:, :, 1] >= crop_size)
+
+    adjusted_occlusions = occlusions.copy()
+    adjusted_occlusions[external_x | external_y] = 1.0
+
     adjusted_points[:, :, 0] = np.clip(adjusted_points[:, :, 0], 0, crop_size)
     adjusted_points[:, :, 1] = np.clip(adjusted_points[:, :, 1], 0, crop_size)
 
     adjusted_points = adjusted_points / crop_size
 
-    return cropped_frames, adjusted_points
+    return cropped_frames, adjusted_points, adjusted_occlusions
 
 
 class PointTrackingEvalDataset(IterableDataset):
@@ -91,15 +98,19 @@ class PointTrackingEvalDataset(IterableDataset):
                 raise ValueError(
                     f"Unsupported pickle structure in {pkl_file}. Must be dict or list."
                 )
-        self.resize_transform = transforms.Resize(256)
+        self.resize_transform = transforms.Resize(128)
         # Debug break if needed
         print("Loaded {} video items.".format(len(self.all_items)))
+
+        # debugging:
+        if self.cfg.finetune_params.test:
+            self.all_items = self.all_items[7:8] * 100
 
     def __iter__(self):
         for (video_name, content) in self.all_items:
             frames_np = content["video"]   # shape (T, H, W, 3), uint8
             points_np = content["points"]  # shape (N, T, 2), float32
-            occluded_np = content["occluded"].astype(float)  # shape (N, T), bool
+            occluded_np = content["occluded"].astype(float)  # shape (N, T), float
 
             T = frames_np.shape[0]
             N = points_np.shape[0]
@@ -140,13 +151,20 @@ class PointTrackingEvalDataset(IterableDataset):
                 # -------------------------------------------------
                 # Perform random cropping to cfg.input_size here
                 # -------------------------------------------------
-                frames_chunk, points_chunk_np = random_crop_4d(
+                frames_chunk, points_chunk_np, occluded_chunk_np = random_crop_4d(
                     frames_chunk,         # shape (3, length, H, W)
                     points_chunk_np,      # shape (N, length, 2)
+                    occluded_chunk_np,    # shape (N, length)
                     self.cfg.input_size
                 )
                 # frames_chunk:  (length, 3, crop_size, crop_size)
                 # points_chunk_np: (N, length, 2) adjusted
+
+                # Remove points not visible in first frame
+                visible_in_first = ~(occluded_chunk_np[:, 0].astype(bool))
+                points_chunk_np = points_chunk_np[visible_in_first]
+                occluded_chunk_np = occluded_chunk_np[visible_in_first]
+                N = np.sum(visible_in_first)
 
                 # 4) target_points => torch, shape (N, length, 2)
                 target_points_torch = torch.from_numpy(points_chunk_np)
@@ -161,9 +179,10 @@ class PointTrackingEvalDataset(IterableDataset):
                 query_points_torch = torch.from_numpy(query_np)
 
                 occluded_points_torch = torch.from_numpy(occluded_chunk_np)
+
                 # 6) Pad if N < vocab_size
-                if N < self.cfg.vocab_size:
-                    diff = self.cfg.vocab_size - N
+                if N < self.cfg.finetune_params.tracks_to_sample:
+                    diff = self.cfg.finetune_params.tracks_to_sample - N
                     # target_points => pad with 0
                     pad_target = torch.zeros(diff, length, 2, dtype=target_points_torch.dtype)
                     target_points_torch = torch.cat([target_points_torch, pad_target], dim=0)
@@ -173,7 +192,11 @@ class PointTrackingEvalDataset(IterableDataset):
                     # occluded_points => pad with 1
                     pad_occluded = torch.ones(diff, length, dtype=occluded_points_torch.dtype)
                     occluded_points_torch = torch.cat([occluded_points_torch, pad_occluded], dim=0)
-
+                if N > self.cfg.finetune_params.tracks_to_sample:
+                    random_idx = np.random.choice(N, self.cfg.finetune_params.tracks_to_sample, replace=False)
+                    target_points_torch = target_points_torch[random_idx]
+                    query_points_torch = query_points_torch[random_idx]
+                    occluded_points_torch = occluded_points_torch[random_idx]
                 # 7) Yield
                 yield (frames_chunk.float(), query_points_torch.float(), target_points_torch.float(), occluded_points_torch.float())
 

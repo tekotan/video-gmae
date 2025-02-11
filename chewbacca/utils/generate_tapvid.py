@@ -183,8 +183,8 @@ def generate_example(video: Video) -> Dict[str, np.ndarray]:
         video.video_path,
         new_tracks,
     )
-
-  example['video'] = np.array(imgs_encoded)
+  frames = np.stack([np.array(Image.open(io.BytesIO(img))) for img in imgs_encoded])
+  example['video'] = frames
   byteio = io.BytesIO(imgs_encoded[0])
   img = Image.open(byteio)
   height, width, _ = np.array(img).shape

@@ -514,7 +514,7 @@ def track_points(
     max_seg_id: The maxium segment id in the video.
     max_sampled_frac: The maximum fraction of points to sample from each
       object, out of all points that lie on the sampling grid.
-    snap_to_occluder: If true, query points within 1 pixel of occlusion 
+    snap_to_occluder: If true, query points within 1 pixel of occlusion
       boundaries will track the occluding surface rather than the background.
       This results in models which are biased to track foreground objects
       instead of background.  Whether this is desirable depends on downstream
@@ -882,7 +882,7 @@ def add_tracks(data,
     max_seg_id: The maxium segment id in the video.
     max_sampled_frac: The maximum fraction of points to sample from each
       object, out of all points that lie on the sampling grid.
-    snap_to_occluder: If true, query points within 1 pixel of occlusion 
+    snap_to_occluder: If true, query points within 1 pixel of occlusion
       boundaries will track the occluding surface rather than the background.
       This results in models which are biased to track foreground objects
       instead of background.  Whether this is desirable depends on downstream
@@ -939,6 +939,7 @@ def add_tracks(data,
       sampling_stride, max_seg_id, max_sampled_frac, snap_to_occluder)
   video = data['video']
 
+
   shp = video.shape.as_list()
   query_points.set_shape([tracks_to_sample, 3])
   target_points.set_shape([tracks_to_sample, num_frames, 2])
@@ -984,6 +985,7 @@ def create_point_tracking_dataset(
     max_sampled_frac=0.1,
     num_parallel_point_extraction_calls=16,
     snap_to_occluder=False,
+    test=False,
     **kwargs):
   """Construct a dataset for point tracking using Kubric.
 
@@ -1006,7 +1008,7 @@ def create_point_tracking_dataset(
       object, out of all points that lie on the sampling grid.
     num_parallel_point_extraction_calls: Int. The num_parallel_calls for the
       map function for point extraction.
-    snap_to_occluder: If true, query points within 1 pixel of occlusion 
+    snap_to_occluder: If true, query points within 1 pixel of occlusion
       boundaries will track the occluding surface rather than the background.
       This results in models which are biased to track foreground objects
       instead of background.  Whether this is desirable depends on downstream
@@ -1023,6 +1025,8 @@ def create_point_tracking_dataset(
       **kwargs)
 
   ds = ds[split]
+  if test:
+    ds = ds.take(1)
   if repeat:
     ds = ds.repeat()
   ds = ds.map(
@@ -1037,76 +1041,13 @@ def create_point_tracking_dataset(
           max_sampled_frac=max_sampled_frac,
           snap_to_occluder=snap_to_occluder),
       num_parallel_calls=num_parallel_point_extraction_calls)
-  if shuffle_buffer_size is not None:
+  if shuffle_buffer_size is not None and not test:
     ds = ds.shuffle(shuffle_buffer_size)
 
   for bs in batch_dims[::-1]:
     ds = ds.batch(bs)
 
   return ds
-
-
-def plot_tracks(rgb, points, occluded, trackgroup=None):
-  """Plot tracks with matplotlib."""
-  disp = []
-  cmap = plt.cm.hsv
-
-  z_list = np.arange(
-      points.shape[0]) if trackgroup is None else np.array(trackgroup)
-  # random permutation of the colors so nearby points in the list can get
-  # different colors
-  z_list = np.random.permutation(np.max(z_list) + 1)[z_list]
-  colors = cmap(z_list / (np.max(z_list) + 1))
-  figure_dpi = 64
-
-  for i in range(rgb.shape[0]):
-    fig = plt.figure(
-        figsize=(256 / figure_dpi, 256 / figure_dpi),
-        dpi=figure_dpi,
-        frameon=False,
-        facecolor='w')
-    ax = fig.add_subplot()
-    ax.axis('off')
-    ax.imshow(rgb[i])
-
-    valid = points[:, i, 0] > 0
-    valid = np.logical_and(valid, points[:, i, 0] < rgb.shape[2] - 1)
-    valid = np.logical_and(valid, points[:, i, 1] > 0)
-    valid = np.logical_and(valid, points[:, i, 1] < rgb.shape[1] - 1)
-
-    colalpha = np.concatenate([colors[:, :-1], 1 - occluded[:, i:i + 1]],
-                              axis=1)
-    # Note: matplotlib uses pixel corrdinates, not raster.
-    plt.scatter(
-        points[valid, i, 0] - 0.5,
-        points[valid, i, 1] - 0.5,
-        s=3,
-        c=colalpha[valid],
-    )
-
-    occ2 = occluded[:, i:i + 1]
-
-    colalpha = np.concatenate([colors[:, :-1], occ2], axis=1)
-
-    plt.scatter(
-        points[valid, i, 0],
-        points[valid, i, 1],
-        s=20,
-        facecolors='none',
-        edgecolors=colalpha[valid],
-    )
-
-    plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
-    plt.margins(0, 0)
-    fig.canvas.draw()
-    width, height = fig.get_size_inches() * fig.get_dpi()
-    img = np.frombuffer(
-        fig.canvas.tostring_rgb(),
-        dtype='uint8').reshape(int(height), int(width), 3)
-    disp.append(np.copy(img))
-    plt.close(fig)
-
-  return np.stack(disp, axis=0)
 
 class KubricPointTrackingDataset(IterableDataset):
     def __init__(
@@ -1128,7 +1069,8 @@ class KubricPointTrackingDataset(IterableDataset):
               repeat=True,
               vflip=False,
               random_crop=True,
-              tracks_to_sample=self.cfg.vocab_size,
+              tracks_to_sample=self.cfg.finetune_params.tracks_to_sample,
+              test=self.cfg.finetune_params.test,
           )
 
           # 2) Convert the tf.data.Dataset to a Python generator of NumPy arrays:
@@ -1136,28 +1078,62 @@ class KubricPointTrackingDataset(IterableDataset):
           self.generator = tfds.as_numpy(self.tf_dataset)
 
     def __iter__(self):
-        for sample in self.generator:
-            # sample is a dict with keys: "video", "query_points", "target_points", ...
-            video_np = sample["video"]               # shape: (24, 256, 256, 3)
-            query_points_np = sample["query_points"] # shape: (256, 3)
-            target_points_np = sample["target_points"] # shape: (256, 24, 2)
-            occluded_points_np = sample["occluded"].astype(float)  # shape: (256, 24)
+      for sample in self.generator:
+          # sample is a dict with keys: "video", "query_points", "target_points", ...
+          video_np = sample["video"]               # shape: (24, 256, 256, 3)
+          query_points_np = sample["query_points"] # shape: (256, 3)
+          target_points_np = sample["target_points"] # shape: (256, 24, 2)
+          occluded_points_np = sample["occluded"].astype(float)  # shape: (256, 24)
 
-            # Convert to torch
-            
-            video_np = video_np * .5 + .5
-            video_np = (video_np - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array([0.229, 0.224, 0.225], dtype=np.float32)
-            video_torch = torch.from_numpy(video_np)
+          # Convert to torch
 
-            query_points_np[:, 1:] = query_points_np[:, 1:] / 256
-            target_points_np = target_points_np / 256
-            
-            query_points_torch = torch.from_numpy(query_points_np)
-            target_points_torch = torch.from_numpy(target_points_np)
-            occluded_points_torch = torch.from_numpy(occluded_points_np)
+          video_np = video_np * .5 + .5
+          video_np = (video_np - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array([0.229, 0.224, 0.225], dtype=np.float32)
+          video_torch = torch.from_numpy(video_np)
 
-            # If you prefer (C, T, H, W) for the video, you might permute:
-            video_torch = video_torch.permute(3, 0, 1, 2) 
-            # or something similar depending on your downstream model
+          query_points_np[:, 1:] = query_points_np[:, 1:] / 256
+          target_points_np = target_points_np / 256
 
-            yield (video_torch, query_points_torch, target_points_torch, occluded_points_torch)
+          visible_in_first = ~(occluded_points_np[:, 0].astype(bool))
+          points_chunk_np = target_points_np[visible_in_first]
+          occluded_chunk_np = occluded_points_np[visible_in_first]
+          N = np.sum(visible_in_first)
+
+          # 4) target_points => torch, shape (N, length, 2)
+          target_points_torch = torch.from_numpy(points_chunk_np)
+
+          # 5) query_points => from time=0 in THIS chunk => shape (N, 2)
+          # Convert (x, y) -> (0, y, x)
+          first_time_np = points_chunk_np[:, 0, :]  # (N, 2)
+          zeros = np.zeros((N, 1), dtype=first_time_np.dtype)
+          y_vals = first_time_np[:, 1:2]
+          x_vals = first_time_np[:, 0:1]
+          query_np = np.concatenate([zeros, y_vals, x_vals], axis=1)  # (N, 3)
+          query_points_torch = torch.from_numpy(query_np)
+
+          occluded_points_torch = torch.from_numpy(occluded_chunk_np)
+
+          # 6) Pad if N < vocab_size
+          if N < self.cfg.finetune_params.tracks_to_sample:
+              diff = self.cfg.finetune_params.tracks_to_sample - N
+              # target_points => pad with 0
+              pad_target = torch.zeros(diff, target_points_np.shape[1], 2, dtype=target_points_torch.dtype)
+              target_points_torch = torch.cat([target_points_torch, pad_target], dim=0)
+              # query_points => pad with -1
+              pad_query = -1.0 * torch.ones(diff, 3, dtype=query_points_torch.dtype)
+              query_points_torch = torch.cat([query_points_torch, pad_query], dim=0)
+              # occluded_points => pad with 1
+              pad_occluded = torch.ones(diff, occluded_points_torch.shape[1], dtype=occluded_points_torch.dtype)
+              occluded_points_torch = torch.cat([occluded_points_torch, pad_occluded], dim=0)
+
+          if self.cfg.finetune_params.batch_prediction:
+            num_delete = np.random.randint(0, self.cfg.finetune_params.tracks_to_sample)
+            query_points_np[-num_delete:] = -1
+            target_points_np[-num_delete:] = 0
+            occluded_points_np[-num_delete:] = 1
+
+          # If you prefer (C, T, H, W) for the video, you might permute:
+          video_torch = video_torch.permute(3, 0, 1, 2)
+          # or something similar depending on your downstream model
+
+          yield (video_torch, query_points_torch, target_points_torch, occluded_points_torch)
