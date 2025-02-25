@@ -1020,7 +1020,8 @@ def create_point_tracking_dataset(
   """
   ds = tfds.load(
       'movi_e/256x256',
-      data_dir='gs://kubric-public/tfds',
+      # data_dir="/scratch/one_month/current/tekotan/kubric/", with_info=True,
+      data_dir="gs://kubric-public/tfds",
       shuffle_files=shuffle_buffer_size is not None,
       **kwargs)
 

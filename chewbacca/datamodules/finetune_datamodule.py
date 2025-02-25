@@ -65,29 +65,39 @@ class FinetuneDataModule(LightningDataModule):
         # load and split datasets only if not loaded already
 
         # for evals
-        if "eval" in self.hparams.cfg.training_type:
-            from chewbacca.datamodules.components.point_tracking_eval_dataset import PointTrackingEvalDataset
+        if "point-tracking" in self.hparams.cfg.training_type:
+            if "eval" in self.hparams.cfg.training_type:
+                from chewbacca.datamodules.components.point_tracking_eval_dataset import PointTrackingEvalDataset
 
-            pickle_files = [
-                "/home/tekotan/Chewbacca_test/data-download/tapvid_davis/tapvid_davis.pkl",
-                "/home/tekotan/Chewbacca_test/data-download/tapvid_rgb_stacking/tapvid_rgb_stacking.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0000_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0001_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0002_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0003_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0004_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0005_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0006_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0007_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0008_of_0010.pkl",
-                # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0009_of_0010.pkl",
-            ]
-            self.data_train = PointTrackingEvalDataset(pickle_files, self.hparams.cfg)
-            self.data_val = PointTrackingEvalDataset(pickle_files, self.hparams.cfg)
-        elif "train" in self.hparams.cfg.training_type:
-            from chewbacca.datamodules.components.kubric_dataset import KubricPointTrackingDataset
-            self.data_train = KubricPointTrackingDataset(self.hparams.cfg, True)
-            self.data_val = KubricPointTrackingDataset(self.hparams.cfg, False)
+                pickle_files = [
+                    "/home/tekotan/Chewbacca_test/data-download/tapvid_davis/tapvid_davis.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_rgb_stacking/tapvid_rgb_stacking.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0000_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0001_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0002_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0003_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0004_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0005_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0006_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0007_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0008_of_0010.pkl",
+                    # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0009_of_0010.pkl",
+                ]
+                self.data_train = PointTrackingEvalDataset(pickle_files, self.hparams.cfg)
+                self.data_val = PointTrackingEvalDataset(pickle_files, self.hparams.cfg)
+            elif "train" in self.hparams.cfg.training_type:
+                from chewbacca.datamodules.components.kubric_dataset import KubricPointTrackingDataset
+                self.data_train = KubricPointTrackingDataset(self.hparams.cfg, True)
+                self.data_val = KubricPointTrackingDataset(self.hparams.cfg, False)
+        elif "object-tracking" in self.hparams.cfg.training_type:
+            from chewbacca.datamodules.components.mot_dataset import VideoAnnotationDataset
+            video_paths_train = np.load("data/mot_train_label.npy")
+            if self.hparams.cfg.finetune_params.test:
+                video_paths_val = np.load("data/mot_train_label.npy")
+            else:
+                video_paths_val = np.load("data/mot_val_label.npy")
+            self.data_train = VideoAnnotationDataset(self.hparams.cfg, video_paths_train, "/datasets/motsynth_2024-01-10_1813/MOTSynth_mot_annotations/mot_annotations/", train=True)
+            self.data_val = VideoAnnotationDataset(self.hparams.cfg, video_paths_val, "/datasets/motsynth_2024-01-10_1813/MOTSynth_mot_annotations/mot_annotations/", train=False)
         else:
             raise ValueError("Invalid Dataset Specification")
 

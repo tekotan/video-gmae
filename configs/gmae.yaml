@@ -258,4 +258,6 @@ configs:
         batch_prediction: True
         tracks_to_sample: 32
         new_readout_mode: False
+        zero_t_prediction: False
+        autoregressive: False
         test: False

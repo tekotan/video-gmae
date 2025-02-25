@@ -21,6 +21,50 @@ from chewbacca.models.components.mae.models_mae_video import MaskedAutoencoderVi
 import cv2
 import matplotlib.pyplot as plt
 
+import torch
+import torch.nn.functional as F
+
+class CausalAttention(Attention):
+    def forward(self, x):
+
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.attn_drop.p if self.training else 0.,
+                is_causal=True
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            causal_mask = torch.tril(torch.ones(N, N, device=x.device)).unsqueeze(0).unsqueeze(0)
+            attn = attn.masked_fill(causal_mask == 0, float('-inf'))
+
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+class CausalBlock(Block):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Replace the attention module with the causal version
+        self.attn = CausalAttention(
+            dim=self.attn.qkv.in_features,
+            num_heads=self.attn.num_heads,
+            qkv_bias=self.attn.qkv.bias is not None,
+            attn_drop=self.attn.attn_drop.p,
+            proj_drop=self.attn.proj_drop.p
+        )
+
 class CrossAttentionReadout(nn.Module):
     def __init__(self, embed_dim, cond_size, output_size, num_heads=8, num_enc_tokens=8, num_input_frames=24, num_fourier_features=16):
         super().__init__()
@@ -79,7 +123,8 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_tracks=1000,
                  number_of_frames=2, reuse_decoder=False, num_fourier_features=16,
-                 batch_prediction=True, new_readout_mode=True):
+                 batch_prediction=True, new_readout_mode=True, zero_t_prediction=False,
+                 autoregressive=False):
         # Original initialization code preserved
         nn.Module.__init__(self)
         self.number_of_frames = number_of_frames
@@ -95,8 +140,8 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
                 for i in range(depth)])
 
-        # self.blocks.requires_grad = False
-        # self.patch_embed.requires_grad = False
+        self.blocks.requires_grad = False
+        self.patch_embed.requires_grad = False
 
         self.norm = norm_layer(embed_dim)
         self.num_layers = depth
@@ -106,32 +151,40 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         self.new_readout_mode = new_readout_mode
         self.mode = mode
 
-        if new_readout_mode:
-            if self.mode == "object-tracking":
-                self.cond_size = 4
-                self.output_size = 4
-            elif self.mode == "point-tracking":
-                self.cond_size = 3
-                self.output_size = 3
+        if self.mode == "object-tracking":
+            self.cond_size = 4
+            self.output_size = 4
+            self.input_frames = 32
+        elif self.mode == "point-tracking":
+            self.cond_size = 3
+            self.output_size = 3
+            self.input_frames = 24
 
+        if new_readout_mode:
             self.readout = CrossAttentionReadout(
                 embed_dim=embed_dim,
                 cond_size=self.cond_size,
                 output_size=self.output_size,
                 num_heads=8,
-                num_enc_tokens=1176,
-                num_input_frames=24,
+                num_enc_tokens=49 * self.input_frames,
+                num_input_frames=self.input_frames,
                 num_fourier_features=num_fourier_features
             )
         else:
             # Original decoder components preserved
             self.reuse_decoder = reuse_decoder
+            if autoregressive:
+                assert batch_prediction == False
+                DecoderBlock = CausalBlock
+            else:
+                DecoderBlock = Block
+
             if not self.reuse_decoder:
                 self.decoder_embed_fine = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
                 self.mask_token_fine = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
                 self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, decoder_embed_dim), requires_grad=False)
                 self.decoder_blocks_fine = nn.ModuleList([
-                    Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
+                    DecoderBlock(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
                     for i in range(decoder_depth)])
                 self.decoder_norm_fine = norm_layer(decoder_embed_dim)
             else:
@@ -139,7 +192,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
                 self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, decoder_embed_dim), requires_grad=False)
                 self.decoder_blocks = nn.ModuleList([
-                    Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
+                    DecoderBlock(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
                     for i in range(decoder_depth)])
                 self.decoder_norm = norm_layer(decoder_embed_dim)
 
@@ -148,20 +201,39 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         self.batch_prediction = batch_prediction
         self.num_fourier_features = num_fourier_features
         self.linear_cond = None
+        self.zero_t_prediction = zero_t_prediction
+        self.autoregressive = autoregressive
 
         if self.mode == "point-tracking":
             if self.batch_prediction:
-                self.input_frames = 24
-                self.params_per_out = self.input_frames * 3
-                self.cond_size = self.num_fourier_features * 3 if self.num_fourier_features > 0 else 3
+                self.params_per_out = self.input_frames * self.output_size
+                self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
                 self.linear_cond = nn.Linear(self.cond_size, decoder_embed_dim)
             else:
-                self.input_frames = 24
-                self.params_per_out = 3
+                self.params_per_out = self.output_size
                 self.num_decoder_queries = self.input_frames
-                self.cond_size = self.num_fourier_features * 3 if self.num_fourier_features > 0 else 3
+                self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
+        elif self.mode == "object-tracking":
+            if self.batch_prediction:
+                self.params_per_out = self.input_frames * self.output_size
+                self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
+                self.linear_cond = nn.Linear(self.cond_size, decoder_embed_dim)
+            else:
+                self.params_per_out = self.output_size
+                self.num_decoder_queries = self.input_frames
+                self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
         else:
             self.input_frames = self.total_frames
+
+        if self.zero_t_prediction:
+            if self.batch_prediction:
+                self.params_per_out = int(self.params_per_out / self.input_frames)
+                self.num_decoder_queries = num_tracks * 2
+            else:
+                self.num_decoder_queries = 2
+
+        if self.zero_t_prediction:
+            self.frame_pos_embed = nn.Parameter(torch.zeros(1, self.total_frames, decoder_embed_dim))
 
         self.number_of_frames = 1
         self.decoder_pos_embed_cond = nn.Parameter(torch.rand(1, self.num_decoder_queries, decoder_embed_dim), requires_grad=True)
@@ -209,13 +281,17 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         return x, mask, ids_restore, latents
 
     def decoder_step(self, x, mask_tokens, frame_token=None):
-        if self.new_readout_mod:
+        if self.new_readout_mode:
             # Process through cross-attention readout
             x_ = self.readout(x)
             return x_
         else:
-            # Original decoder step preserved
-            x_ = torch.cat([x, mask_tokens], dim=1)
+            if frame_token is not None:
+                x_ = torch.cat([x, frame_token, mask_tokens], dim=1)
+            else:
+                # Original decoder step preserved
+                x_ = torch.cat([x, mask_tokens], dim=1)
+
             if not self.reuse_decoder:
                 for blk in self.decoder_blocks_fine:
                     x_ = blk(x_)
@@ -225,7 +301,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                     x_ = blk(x_)
                 x_ = self.decoder_norm(x_)
 
-            x_points = self.linear_out(x_[:, -self.num_decoder_queries:])
+            x_points = self.linear_out(x_[:, -mask_tokens.shape[1]:])
             return x_points
 
     def forward_decoder(self, x, ids_restore, cond=None, limit_gaussian=-1, frame_num=None):
@@ -241,41 +317,76 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             queries = self.readout.fourier_embedding(query_points)
             queries = self.readout.query_mlp(queries)
 
-            # Replicate queries with temporal embeddings
-            queries = queries.unsqueeze(2).repeat(1, 1, self.input_frames, 1)
-            queries = queries + self.readout.query_temporal_embed.unsqueeze(1)
-            batch_size = queries.shape[0]
-            queries = queries.view(batch_size, -1, self.embed_dim)
+            if self.zero_t_prediction:
+                random_frame = torch.randint(low=1, high=self.input_frames, size=()) if not frame_num else frame_num
+                queries_0 = queries.unsqueeze(2) + self.readout.query_temporal_embed[:, 0:1].unsqueeze(1)
+                queries_t = queries.unsqueeze(2) + self.readout.query_temporal_embed[:, random_frame:random_frame+1].unsqueeze(1)
+                queries_2frames = torch.cat([queries_0, queries_t], dim=2)
+                B, N, F, D = queries_2frames.shape
+                queries_2frames = queries_2frames.view(B, N*F, D)
 
-            # Cross attention
-            queries = self.readout.norm1(queries)
-            attn_output, _ = self.readout.cross_attn(queries, x, x)
-            queries = queries + attn_output
+                queries_2frames = self.readout.norm1(queries_2frames)
+                attn_output, _ = self.readout.cross_attn(queries_2frames, x, x)
+                queries_2frames = queries_2frames + attn_output
 
-            # MLP
-            queries = queries + self.readout.mlp(self.readout.norm2(queries))
+                # MLP
+                queries_2frames = queries_2frames + self.readout.mlp(
+                    self.readout.norm2(queries_2frames)
+                )
 
-            # Output projection
-            outputs = self.readout.output_proj(queries)
-            outputs = outputs.view(batch_size, -1, self.input_frames, 3)
+                # Output projection
+                outputs = self.readout.output_proj(queries_2frames)
+                outputs = outputs.view(B, N, F, self.output_size)
 
-            if self.mode == "point-tracking":
-                positions = torch.sigmoid(outputs[..., :2])
-                visibility = torch.sigmoid(outputs[..., 2])
-                return positions, visibility
-            elif self.mode == "object-tracking":
+                if self.mode == "point-tracking":
+                    positions = torch.sigmoid(outputs[..., :2])
+                    visibility = torch.sigmoid(outputs[..., 2])
+                    return positions, visibility, random_frame
+                elif self.mode == "object-tracking":
+                    bboxes = torch.sigmoid(outputs[..., :4])
+                    return bboxes, random_frame
                 return outputs
+            else:
+                random_frame = None
+                # Replicate queries with temporal embeddings
+                queries = queries.unsqueeze(2).repeat(1, 1, self.input_frames, 1)
+                queries = queries + self.readout.query_temporal_embed.unsqueeze(1)
+                batch_size = queries.shape[0]
+                queries = queries.view(batch_size, -1, self.embed_dim)
 
-            return outputs
+                # Cross attention
+                queries = self.readout.norm1(queries)
+                attn_output, _ = self.readout.cross_attn(queries, x, x)
+                queries = queries + attn_output
+
+                # MLP
+                queries = queries + self.readout.mlp(self.readout.norm2(queries))
+
+                # Output projection
+                outputs = self.readout.output_proj(queries)
+                outputs = outputs.view(batch_size, -1, self.input_frames, self.output_size)
+
+                if self.mode == "point-tracking":
+                    positions = torch.sigmoid(outputs[..., :2])
+                    visibility = torch.sigmoid(outputs[..., 2])
+                    return positions, visibility, random_frame
+                elif self.mode == "object-tracking":
+                    bboxes = torch.sigmoid(outputs[..., :4])
+                    return bboxes, random_frame
+
+                return outputs, random_frame
 
         else:
-            # Original decoder code preserved
+            if self.autoregressive:
+                num_mask_repeat = cond.shape[1]
+            else:
+                num_mask_repeat = self.num_decoder_queries
             if not self.reuse_decoder:
                 x_ = self.decoder_embed_fine(x)
-                mask_tokens = self.mask_token_fine.repeat(x_.shape[0], self.num_decoder_queries, 1)
+                mask_tokens = self.mask_token_fine.repeat(x_.shape[0], num_mask_repeat, 1)
             else:
                 x_ = self.decoder_embed(x)
-                mask_tokens = self.mask_token.repeat(x_.shape[0], self.num_decoder_queries, 1)
+                mask_tokens = self.mask_token.repeat(x_.shape[0], num_mask_repeat, 1)
 
             ids_shuffle = torch.argsort(ids_restore, dim=1)
             ids_shuffle = ids_shuffle[:, :x_.shape[1]]
@@ -289,36 +400,97 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                     decoder_cond_embedding = self.linear_cond(cond)
                     mask_tokens += decoder_cond_embedding
             else:
-                frames = torch.arange(self.num_decoder_queries, device=x_.device).repeat(x_.shape[0], 1).unsqueeze(-1)
-                t_cond = cond[:, 0, 0].int()
+                frames = torch.arange(num_mask_repeat, device=x_.device).repeat(x_.shape[0], 1).unsqueeze(-1)
+                if self.autoregressive:
+                    t_cond = torch.arange(cond.shape[1], device=x_.device)
+                else:
+                    t_cond = cond[:, 0, 0].int()
+
                 num_feats = max(self.num_fourier_features, 1)
                 if self.num_fourier_features > 0:
                     frames = fourier_encode_3d(frames, self.num_fourier_features)
                     cond = fourier_encode_3d(cond, self.num_fourier_features)
+                    
                 mask_tokens[:, :, :num_feats] = frames
-                mask_tokens[:, t_cond, :num_feats*3] = cond
+                mask_tokens[:, t_cond, :self.cond_size] = cond.float()
 
-            mask_tokens += self.decoder_pos_embed_cond
-
-            x_points = self.decoder_step(x_, mask_tokens)
-            if self.batch_prediction:
-                x_points = x_points.reshape(x_points.shape[0], self.num_decoder_queries, self.input_frames, -1)
+            mask_tokens += self.decoder_pos_embed_cond[:, :num_mask_repeat, :]
+            if self.zero_t_prediction:
+                random_frame = torch.randint(low=1, high=self.input_frames, size=()) if not frame_num else frame_num
+                frame_token = self.frame_pos_embed[:, random_frame:random_frame+1, :].repeat(x_.shape[0], 1, 1)
+                mask_tokens = torch.cat([mask_tokens[:, 0:1], mask_tokens[:, random_frame:random_frame+1]], dim=1)
             else:
-                x_points = x_points.reshape(x_points.shape[0], 1, self.num_decoder_queries, -1)
+                random_frame = 0
+                frame_token = None
+
+            x_points = self.decoder_step(x_, mask_tokens, frame_token=frame_token)
+            if self.batch_prediction:
+                if self.zero_t_prediction:
+                    x_points = x_points.reshape(x_points.shape[0], num_mask_repeat, 2, -1)
+                else:
+                    x_points = x_points.reshape(x_points.shape[0], num_mask_repeat, self.input_frames, -1)
+            else:
+                x_points = x_points.reshape(x_points.shape[0], 1, num_mask_repeat, -1)
 
             if self.mode == "point-tracking":
                 occluded = torch.nn.functional.sigmoid(x_points[:, :, :, 2])
                 x_points = x_points[:, :, :, :2]
-                return x_points, occluded
+                return x_points, occluded, random_frame
+            elif self.mode == "object-tracking":
+                bboxes = torch.sigmoid(x_points[..., :4])
+                return bboxes, random_frame
 
-            return x_points
+            return x_points, random_frame
+    def forward_decoder_zero_t(self, x, ids_restore, cond=None, limit_gaussian=-1):
+        preds = []
+        visibility = []
+        for i in range(1, self.input_frames):
+            pred, vis, _ = self.forward_decoder(x, ids_restore, cond, limit_gaussian, frame_num=i)
+            if len(preds) == 0:
+                preds.append(pred)
+                visibility.append(vis)
+            else:
+                preds.append(pred[:, :, 1:])
+                visibility.append(vis[:, :, 1:])
+        return torch.cat(preds, dim=2), torch.cat(visibility, dim=2)
+    def forward_decoder_autoreg(self, x, ids_restore, cond=None, limit_gaussian=-1):
+        if self.mode == "point-tracking":
+            visibility = [cond[:, :, 0:1].unsqueeze(2)]
+            preds = [cond[:, :, 1:].unsqueeze(2)]
+        elif self.mode == "object-tracking":
+            preds = [cond.unsqueeze(2)]
 
+        cond_ = cond.clone()
+        for i in range(self.input_frames-1):
+            if self.mode == "point-tracking":
+                pred, vis, _ = self.forward_decoder(x, ids_restore, cond_, limit_gaussian, frame_num=i)
+                visibility.append(vis[:, :, -1:].unsqueeze(-1))
+            elif self.mode == "object-tracking":
+                pred, _ = self.forward_decoder(x, ids_restore, cond_, limit_gaussian, frame_num=i)
+
+            preds.append(pred[:, :, -1:])
+            if self.mode == "point-tracking":
+                cond_ = torch.cat([cond_, torch.cat([vis[:, :, -1].unsqueeze(-1), pred[:, :, -1]], dim=-1)], dim=1)
+            elif self.mode == "object-tracking":
+                cond_ = torch.cat([cond_, pred[:, :, -1]], dim=1)
+        if self.mode == "point-tracking":
+            return torch.cat(preds, dim=2), torch.cat(visibility, dim=2).unsqueeze(-1)
+        elif self.mode == "object-tracking":
+            return torch.cat(preds, dim=2)
+        
 # Rest of the code preserved as-is
 # Model instantiation functions
 def finetune_vit_base_patch16_dec512d8b(**kwargs):
     model = FinetuneMaskedAutoencoderViT(
         patch_size=16, embed_dim=768, depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
+        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    return model
+
+def finetune_vit_base_patch16_dec512d2b(**kwargs):
+    model = FinetuneMaskedAutoencoderViT(
+        patch_size=16, embed_dim=768, depth=12, num_heads=12,
+        decoder_embed_dim=512, decoder_depth=2, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
@@ -413,6 +585,7 @@ def finetune_vit_large_patch16_dec256d8b_GAUSSIAN(**kwargs):
 
 # set recommended archs
 finetune_vit_base_patch16 = finetune_vit_base_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
+finetune_vit_base_patch16_small = finetune_vit_base_patch16_dec512d2b # decoder: 512 dim, 4 blocks
 finetune_vit_large_patch16 = finetune_vit_large_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
 finetune_vit_huge_patch14 = finetune_vit_huge_patch14_dec512d8b  # decoder: 512 dim, 8 blocks
 finetune_vit_huge_patch16 = finetune_vit_huge_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
