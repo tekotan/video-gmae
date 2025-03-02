@@ -24,6 +24,79 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
+def modulate(x, shift, scale):
+    return x * (1 + scale) + shift
+
+class DITHead(nn.Module):
+    """
+    The final layer of DiT.
+    """
+    def __init__(self, hidden_size, out_channels):
+        super().__init__()
+        self.norm_final = nn.LayerNorm(out_channels, elementwise_affine=False, eps=1e-6)
+        self.linear = nn.Linear(out_channels, out_channels, bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * out_channels, bias=True)
+        )
+        self.norm_final_c = nn.LayerNorm(out_channels, elementwise_affine=False, eps=1e-6)
+        self.linear_c = nn.Linear(out_channels, out_channels, bias=True)
+        self.adaLN_modulation_c = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * out_channels, bias=True)
+        )
+
+    def forward(self, x, t, c):
+        t = t + c
+        shift, scale = self.adaLN_modulation(t).chunk(2, dim=1)
+        x = modulate(self.norm_final(x), shift, scale)
+        x = self.linear(x)
+
+        # shift_c, scale_c = self.adaLN_modulation_c(c).chunk(2, dim=1)
+        # x = modulate(self.norm_final_c(x), shift_c, scale_c)
+        # x = self.linear_c(x)
+        return x
+
+
+class TimestepEmbedder(nn.Module):
+    """
+    Embeds scalar timesteps into vector representations.
+    """
+    def __init__(self, hidden_size, frequency_embedding_size=256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size, bias=True),
+        )
+        self.frequency_embedding_size = frequency_embedding_size
+
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        """
+        Create sinusoidal timestep embeddings.
+        :param t: a 1-D Tensor of N indices, one per batch element.
+                          These may be fractional.
+        :param dim: the dimension of the output.
+        :param max_period: controls the minimum frequency of the embeddings.
+        :return: an (N, D) Tensor of positional embeddings.
+        """
+        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+        ).to(device=t.device)
+        args = t[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        return embedding
+
+    def forward(self, t):
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        t_emb = self.mlp(t_freq)
+        return t_emb
+
 class CausalAttention(Attention):
     def forward(self, x):
 
@@ -124,7 +197,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_tracks=1000,
                  number_of_frames=2, reuse_decoder=False, num_fourier_features=16,
                  batch_prediction=True, new_readout_mode=True, zero_t_prediction=False,
-                 autoregressive=False):
+                 autoregressive=False, quantize_output_bins=None, dit_head=False):
         # Original initialization code preserved
         nn.Module.__init__(self)
         self.number_of_frames = number_of_frames
@@ -195,6 +268,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                     DecoderBlock(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
                     for i in range(decoder_depth)])
                 self.decoder_norm = norm_layer(decoder_embed_dim)
+        self.decoder_embed_dim = decoder_embed_dim
 
         self.norm_pix_loss = norm_pix_loss
         self.num_decoder_queries = num_tracks
@@ -203,12 +277,18 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         self.linear_cond = None
         self.zero_t_prediction = zero_t_prediction
         self.autoregressive = autoregressive
+        self.quantize_output_bins = quantize_output_bins
+        self.dit_head = dit_head
 
         if self.mode == "point-tracking":
             if self.batch_prediction:
                 self.params_per_out = self.input_frames * self.output_size
                 self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
                 self.linear_cond = nn.Linear(self.cond_size, decoder_embed_dim)
+            elif self.quantize_output_bins is not None:
+                self.params_per_out = (self.output_size - 1) * self.quantize_output_bins + 1
+                self.num_decoder_queries = self.input_frames
+                self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
             else:
                 self.params_per_out = self.output_size
                 self.num_decoder_queries = self.input_frames
@@ -218,6 +298,10 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 self.params_per_out = self.input_frames * self.output_size
                 self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
                 self.linear_cond = nn.Linear(self.cond_size, decoder_embed_dim)
+            elif self.quantize_output_bins is not None:
+                self.params_per_out = self.output_size * self.quantize_output_bins
+                self.num_decoder_queries = self.input_frames
+                self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
             else:
                 self.params_per_out = self.output_size
                 self.num_decoder_queries = self.input_frames
@@ -232,12 +316,19 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             else:
                 self.num_decoder_queries = 2
 
-        if self.zero_t_prediction:
             self.frame_pos_embed = nn.Parameter(torch.zeros(1, self.total_frames, decoder_embed_dim))
 
         self.number_of_frames = 1
         self.decoder_pos_embed_cond = nn.Parameter(torch.rand(1, self.num_decoder_queries, decoder_embed_dim), requires_grad=True)
-        self.linear_out = nn.Linear(decoder_embed_dim, self.params_per_out, bias=True)
+        if self.dit_head:
+            if self.mode == "point-tracking":
+                self.linear_out = nn.Linear(decoder_embed_dim, 1, bias=True)
+                self.dit_out = DITHead(decoder_embed_dim, self.params_per_out-1)
+            else:
+                self.dit_out = DITHead(decoder_embed_dim, self.params_per_out)
+            self.timestep_embed = TimestepEmbedder(decoder_embed_dim, frequency_embedding_size=256)
+        else:
+            self.linear_out = nn.Linear(decoder_embed_dim, self.params_per_out, bias=True)
 
     def initialize_weights(self):
         # Original initialization code preserved
@@ -279,8 +370,32 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         x = self.norm(x)
 
         return x, mask, ids_restore, latents
+    def dit_step(self, x, dit_z, dit_training=True):
+        B = x.shape[0]
+        T = x.shape[1]
+        if dit_training:
+            z0, z1 = dit_z
 
-    def decoder_step(self, x, mask_tokens, frame_token=None):
+            t = torch.rand(B * T, device=x.device)
+            t_emb = self.timestep_embed(t)
+            # z0 = torch.randn(B * T, joints_out.shape[2], device=joints_out.device)
+            # z1 = mano_joints[:, 1:].reshape(B * T, 63)
+            zt = t.unsqueeze(-1) * z1 + (1 - t.unsqueeze(-1)) * z0
+            out_z = self.dit_out(zt, t_emb, x.reshape(B * T, self.decoder_embed_dim))
+            return out_z.view(B, T, -1)
+        else:
+            z0, _ = dit_z
+            steps = 10
+            for i in range(steps):
+                t = torch.rand(B * T, device=x.device) * 0 + i / steps
+                t_emb = self.timestep_embed(t)
+
+                out_z = self.dit_out(z0, t_emb, x.reshape(B * T, self.decoder_embed_dim))
+                z0 = z0 + out_z * (1.0 / steps)
+            out_z = z0.view(B, T, -1)
+
+        return out_z
+    def decoder_step(self, x, mask_tokens, frame_token=None, dit_training=True, dit_z=None):
         if self.new_readout_mode:
             # Process through cross-attention readout
             x_ = self.readout(x)
@@ -300,11 +415,25 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 for blk in self.decoder_blocks:
                     x_ = blk(x_)
                 x_ = self.decoder_norm(x_)
-
-            x_points = self.linear_out(x_[:, -mask_tokens.shape[1]:])
+            if self.dit_head:
+                linear_in = x_[:, -mask_tokens.shape[1]:]
+                x_points = self.dit_step(linear_in, dit_training=dit_training, dit_z=dit_z)
+                
+                if self.mode == "point-tracking":
+                    occlusions = []
+                    for idx in range(linear_in.shape[1]):
+                        occlusions.append(self.linear_out(linear_in[:, idx]))
+                    occlusions = torch.stack(occlusions, dim=1)
+                    x_points = torch.cat([x_points, occlusions], dim=-1)
+            else:
+                linear_in = x_[:, -mask_tokens.shape[1]:]
+                x_points = []
+                for idx in range(linear_in.shape[1]):
+                    x_points.append(self.linear_out(linear_in[:, idx]))
+                x_points = torch.stack(x_points, dim=1)
             return x_points
 
-    def forward_decoder(self, x, ids_restore, cond=None, limit_gaussian=-1, frame_num=None):
+    def forward_decoder(self, x, ids_restore, cond=None, limit_gaussian=-1, frame_num=None, dit_training=True, dit_z=None):
         if self.new_readout_mode:
             # Fourier encode the query points
             query_points = fourier_encode_3d(cond, self.num_fourier_features)
@@ -423,7 +552,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 random_frame = 0
                 frame_token = None
 
-            x_points = self.decoder_step(x_, mask_tokens, frame_token=frame_token)
+            x_points = self.decoder_step(x_, mask_tokens, frame_token=frame_token, dit_training=dit_training, dit_z=dit_z)
             if self.batch_prediction:
                 if self.zero_t_prediction:
                     x_points = x_points.reshape(x_points.shape[0], num_mask_repeat, 2, -1)
@@ -433,11 +562,24 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 x_points = x_points.reshape(x_points.shape[0], 1, num_mask_repeat, -1)
 
             if self.mode == "point-tracking":
-                occluded = torch.nn.functional.sigmoid(x_points[:, :, :, 2])
-                x_points = x_points[:, :, :, :2]
+                if self.quantize_output_bins is not None:
+                    occluded = torch.nn.functional.sigmoid(x_points[:, :, :, -1])
+                    x_points_x = x_points[:, :, :, :self.quantize_output_bins]
+                    x_points_y = x_points[:, :, :, self.quantize_output_bins:self.quantize_output_bins*2]
+                    x_points = torch.stack([x_points_x, x_points_y], dim=-2)
+                else:
+                    occluded = torch.nn.functional.sigmoid(x_points[:, :, :, 2])
+                    x_points = x_points[:, :, :, :2]
                 return x_points, occluded, random_frame
             elif self.mode == "object-tracking":
-                bboxes = torch.sigmoid(x_points[..., :4])
+                if self.quantize_output_bins is not None:
+                    bboxes_xmin = x_points[:, :, :, :self.quantize_output_bins]
+                    bboxes_ymin = x_points[:, :, :, self.quantize_output_bins:self.quantize_output_bins*2]
+                    bboxes_xmax = x_points[:, :, :, self.quantize_output_bins*2:self.quantize_output_bins*3]
+                    bboxes_ymax = x_points[:, :, :, self.quantize_output_bins*3:self.quantize_output_bins*4]
+                    bboxes = torch.stack([bboxes_xmin, bboxes_ymin, bboxes_xmax, bboxes_ymax], dim=-2)
+                else:
+                    bboxes = torch.sigmoid(x_points[..., :4])
                 return bboxes, random_frame
 
             return x_points, random_frame
@@ -453,24 +595,46 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 preds.append(pred[:, :, 1:])
                 visibility.append(vis[:, :, 1:])
         return torch.cat(preds, dim=2), torch.cat(visibility, dim=2)
-    def forward_decoder_autoreg(self, x, ids_restore, cond=None, limit_gaussian=-1):
+    def forward_decoder_autoreg(self, x, ids_restore, cond=None, limit_gaussian=-1, return_logits=False, dit_training=True, dit_z=None):
         if self.mode == "point-tracking":
-            visibility = [cond[:, :, 0:1].unsqueeze(2)]
-            preds = [cond[:, :, 1:].unsqueeze(2)]
+            if return_logits:
+                visibility = []
+                preds = []
+            else:
+                visibility = [(cond[:, :, 0:1] > 0.5).float().unsqueeze(1)]
+                preds = [cond[:, :, 1:].unsqueeze(1)]
         elif self.mode == "object-tracking":
-            preds = [cond.unsqueeze(2)]
+            if return_logits:
+                preds = []
+            else:
+                preds = [cond.unsqueeze(1)]
 
         cond_ = cond.clone()
         for i in range(self.input_frames-1):
+            if self.dit_head:
+                if self.mode == "point-tracking":
+                    z0 = torch.randn(cond_.shape[0] * cond_.shape[1], cond_.shape[2]-1, device=cond_.device)
+                else:
+                    z0 = torch.randn(cond_.shape[0] * cond_.shape[1], cond_.shape[2], device=cond_.device)
+            else:
+                z0 = None
+            dit_z = (z0, None)
+
             if self.mode == "point-tracking":
-                pred, vis, _ = self.forward_decoder(x, ids_restore, cond_, limit_gaussian, frame_num=i)
+                pred, vis, _ = self.forward_decoder(x, ids_restore, cond_, limit_gaussian, frame_num=i, dit_training=False, dit_z=dit_z)
                 visibility.append(vis[:, :, -1:].unsqueeze(-1))
             elif self.mode == "object-tracking":
-                pred, _ = self.forward_decoder(x, ids_restore, cond_, limit_gaussian, frame_num=i)
+                pred, _ = self.forward_decoder(x, ids_restore, cond_, limit_gaussian, frame_num=i, dit_training=False, dit_z=dit_z)
+            if self.quantize_output_bins is not None and not return_logits:
+                pred = (torch.argmax(pred, dim=-1) / self.quantize_output_bins)
 
             preds.append(pred[:, :, -1:])
+
+            if return_logits:
+                pred = (torch.argmax(pred, dim=-1) / self.quantize_output_bins)
+
             if self.mode == "point-tracking":
-                cond_ = torch.cat([cond_, torch.cat([vis[:, :, -1].unsqueeze(-1), pred[:, :, -1]], dim=-1)], dim=1)
+                cond_ = torch.cat([cond_, torch.cat([(vis[:, :, -1] > 0.5).unsqueeze(-1).float(), pred[:, :, -1]], dim=-1)], dim=1)
             elif self.mode == "object-tracking":
                 cond_ = torch.cat([cond_, pred[:, :, -1]], dim=1)
         if self.mode == "point-tracking":

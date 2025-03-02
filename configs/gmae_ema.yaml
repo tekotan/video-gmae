@@ -268,4 +268,6 @@ configs:
         new_readout_mode: False
         zero_t_prediction: False
         autoregressive: False
+        quantize_output_bins: null
+        dit_head: False
         test: False

@@ -5,14 +5,14 @@ hydra/launcher=submitit_slurm \
 launcher=slurm_em \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vit_base_ucf101_finetune_object_tracking_autoreg_v1 \
+task_name=vit_base_ucf101_finetune_object_tracking_autoreg_dit_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="finetune" \
 configs.model_name="finetune_vit_base_patch16" \
 configs.input_size=112 \
-configs.lr=5e-4,1e-4,1e-5 \
+configs.lr=1e-3,1e-4,1e-5 \
 configs.weight_decay=5e-2 \
 trainer.accumulate_grad_batches=1 \
 configs.train_batch_size=2 \
@@ -41,7 +41,9 @@ configs.finetune_params.new_readout_mode=False \
 configs.finetune_params.tracks_to_sample=4 \
 configs.finetune_params.test=False \
 configs.finetune_params.zero_t_prediction=False \
-configs.finetune_params.autoregressive=True
+configs.finetune_params.autoregressive=True \
+configs.finetune_params.dit_head=True \
+configs.inference.testing=False
 
 # # !/bin/bash
 # python chewbacca/train.py -m \

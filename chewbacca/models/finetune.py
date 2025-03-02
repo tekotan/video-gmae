@@ -167,6 +167,8 @@ class FinetuneLitModule(LightningModule):
                                                                 new_readout_mode=self.cfg.finetune_params.new_readout_mode,
                                                                 zero_t_prediction = self.cfg.finetune_params.zero_t_prediction,
                                                                 autoregressive=self.cfg.finetune_params.autoregressive,
+                                                                quantize_output_bins=self.cfg.finetune_params.quantize_output_bins,
+                                                                dit_head=self.cfg.finetune_params.dit_head,
                                                             )
         if self.cfg.inference.testing:
             self.encoder.requires_grad = False
@@ -241,8 +243,21 @@ class FinetuneLitModule(LightningModule):
                 active_occluded_true = occluded_true[i, :first_invalid_index]
 
                 # Position loss using Huber loss instead of MSE
-                loss += torch.nn.functional.huber_loss(active_tracks_true, active_tracks_pred) * 100
-                loss += torch.nn.functional.binary_cross_entropy(active_occluded_pred.float(), active_occluded_true.float()) * 0.1
+                if self.cfg.finetune_params.quantize_output_bins is not None:
+                    quantized_targets = torch.round(active_tracks_true * self.cfg.finetune_params.quantize_output_bins)\
+                                        .type(torch.int64).clip(min=0, max=self.cfg.finetune_params.quantize_output_bins-1)
+
+                    for j in range(active_tracks_true.shape[1]):
+                        for k in range(active_tracks_true.shape[2]):
+                            loss += torch.nn.functional.cross_entropy(active_tracks_pred[:, j, k], quantized_targets[:, j, k]) * 100
+
+                    loss += torch.nn.functional.binary_cross_entropy(active_occluded_pred.float(), active_occluded_true.float()) * 0.1
+                elif self.cfg.finetune_params.dit_head:
+                    loss += torch.nn.functional.mse_loss(active_tracks_true, active_tracks_pred) * 100
+                    loss += torch.nn.functional.binary_cross_entropy(active_occluded_pred.float(), active_occluded_true.float()) * 0.1
+                else:
+                    loss += torch.nn.functional.huber_loss(active_tracks_true, active_tracks_pred) * 100
+                    loss += torch.nn.functional.binary_cross_entropy(active_occluded_pred.float(), active_occluded_true.float()) * 0.1
             elif self.mode == "object-tracking":
                 if self.cfg.finetune_params.zero_t_prediction:
                     target_boxes = torch.cat([true[:, :, 0:1], true[:, :, frame_num:frame_num+1]], dim=2)
@@ -273,14 +288,17 @@ class FinetuneLitModule(LightningModule):
                     pred_boxes_clone = pred_boxes_clone[:first_invalid_index]
                     target_boxes_clone = target_boxes_clone[:first_invalid_index]
 
-                    iou_loss = complete_box_iou_loss(pred_boxes_clone, target_boxes_clone, reduction="mean")
-                    if torch.isnan(iou_loss):
-                        log.info(f"iou_loss: {iou_loss}")
-                        log.info(f"pred_boxes: {pred_boxes}")
-                        log.info(f"target_boxes: {target_boxes}")
-
-                    iou_loss = torch.nan_to_num(iou_loss, nan=0.0)
-                    loss += iou_loss
+                    if self.cfg.finetune_params.quantize_output_bins is not None:
+                        quantized_targets = torch.round(target_boxes_clone * self.cfg.finetune_params.quantize_output_bins)\
+                                            .type(torch.int64).clip(min=0, max=self.cfg.finetune_params.quantize_output_bins-1)
+                        for j in range(target_boxes_clone.shape[1]):
+                            loss += torch.nn.functional.cross_entropy(pred_boxes_clone[:, j], quantized_targets[:, j]) * 100
+                    elif self.cfg.finetune_params.dit_head:
+                        loss += torch.nn.functional.mse_loss(pred_boxes_clone, target_boxes_clone)
+                    else:
+                        iou_loss = complete_box_iou_loss(pred_boxes_clone, target_boxes_clone, reduction="mean")
+                        iou_loss = torch.nan_to_num(iou_loss, nan=0.0)
+                        loss += iou_loss
             count += 1
         return loss / B
 
@@ -307,6 +325,8 @@ class FinetuneLitModule(LightningModule):
             else:
                 batch_x_points = []
                 batch_occluded = []
+                if self.cfg.finetune_params.dit_head:
+                    batch_dit_z_diff = []
                 if self.cfg.finetune_params.zero_t_prediction:
                     frame_num = torch.randint(low=1, high=self.encoder.input_frames, size=())
                 else:
@@ -314,31 +334,60 @@ class FinetuneLitModule(LightningModule):
                 for i in range(latent.shape[0]):
                     x_points_ = []
                     occluded_ = []
+                    if self.cfg.finetune_params.dit_head:
+                        dit_z_diff_ = []
                     for j in range(0, init_queries.shape[1], latent.shape[0]):
                         flat_init_queries = init_queries[i, j:j+latent.shape[0]].view(-1, 1, 3)
                         num_points = flat_init_queries.shape[0]
                         if self.cfg.finetune_params.autoregressive:
-                            cond = torch.cat([occluded_points[i, j:j+latent.shape[0], :-1].unsqueeze(-1), finetune_target[i, j:j+latent.shape[0], :-1]], dim=-1)
+                            if self.cfg.finetune_params.quantize_output_bins is not None:
+                                quantized_cond_target = torch.round(finetune_target[i, j:j+latent.shape[0], :-1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins
+                                cond = torch.cat([occluded_points[i, j:j+latent.shape[0], :-1].unsqueeze(-1), quantized_cond_target], dim=-1)
+                            else:
+                                cond = torch.cat([occluded_points[i, j:j+latent.shape[0], :-1].unsqueeze(-1), finetune_target[i, j:j+latent.shape[0], :-1]], dim=-1)
                         else:
                             cond = flat_init_queries
+                        if self.cfg.finetune_params.dit_head:
+                            z1 = finetune_target[i, j:j+latent.shape[0], 1:]
+                            z1 = z1.reshape(z1.shape[0]*z1.shape[1], z1.shape[2])
+                            z0 = torch.randn_like(z1)
+                            dit_z = (z0, z1)
+                            dit_z_diff_.append((z1-z0).view(cond.shape[0], cond.shape[1], -1))
+                        else:
+                            dit_z = None
                             
-                        x_points, occluded, frame_num = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), cond, frame_num=frame_num) # B x 256 x T x 2
+                        if True:
+                        # if np.random.rand() < 1.1:
+                            x_points, occluded, frame_num = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), cond, frame_num=frame_num, dit_training=True, dit_z=dit_z) # B x 256 x T x 2
+                        else:
+                            x_points, occluded = self.encoder.forward_decoder_autoreg(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), cond[:, 0:1], return_logits=True, dit_training=False) # B x 256 x T x 2
+                            frame_num = None
+                            occluded = occluded.squeeze(-1).squeeze(-1)
                         x_points_.append(x_points)
                         occluded_.append(occluded)
 
                     x_points = torch.cat(x_points_, dim=0)
                     occluded = torch.cat(occluded_, dim=0)
 
+                    if self.cfg.finetune_params.dit_head:
+                        dit_z_diff = torch.cat(dit_z_diff_, dim=0)
+                        batch_dit_z_diff.append(dit_z_diff)
 
                     batch_x_points.append(x_points)
-                    batch_occluded.append(occluded)
+                    batch_occluded.append(occluded)                        
+
 
                 x_points = torch.stack(batch_x_points, dim=0).squeeze(2)
                 occlusions_pred = torch.stack(batch_occluded, dim=0).squeeze(2)
+                if self.cfg.finetune_params.dit_head:
+                    dit_z_diff = torch.stack(batch_dit_z_diff, dim=0).squeeze(2)
             if self.cfg.finetune_params.zero_t_prediction:
                 loss = self.forward_loss((finetune_target, occluded_points), (x_points, occlusions_pred), additional_data=(init_queries, frame_num))
             elif self.cfg.finetune_params.autoregressive:
-                loss = self.forward_loss((finetune_target[:, :, 1:], occluded_points[:, :, 1:]), (x_points, occlusions_pred), additional_data=init_queries)
+                if self.cfg.finetune_params.dit_head:
+                    loss = self.forward_loss((dit_z_diff, occluded_points[:, :, 1:]), (x_points, occlusions_pred), additional_data=init_queries)
+                else:
+                    loss = self.forward_loss((finetune_target[:, :, 1:], occluded_points[:, :, 1:]), (x_points, occlusions_pred), additional_data=init_queries)
             else:
                 loss = self.forward_loss((finetune_target, occluded_points), (x_points, occlusions_pred), additional_data=init_queries)
         elif self.mode == "object-tracking":
@@ -346,30 +395,56 @@ class FinetuneLitModule(LightningModule):
                 box_pred, frame_num = self.encoder.forward_decoder(latent, ids_restore, init_queries) # B x 256 x T x 2
             else:
                 batch_box_pred = []
+                if self.cfg.finetune_params.dit_head:
+                    batch_dit_z_diff = []
                 if self.cfg.finetune_params.zero_t_prediction:
                     frame_num = torch.randint(low=1, high=self.encoder.input_frames, size=())
                 else:
                     frame_num = None
                 for i in range(latent.shape[0]):
                     box_pred_ = []
+                    if self.cfg.finetune_params.dit_head:
+                        dit_z_diff_ = []
                     for j in range(0, init_queries.shape[1], latent.shape[0]):
                         flat_init_queries = init_queries[i, j:j+latent.shape[0]].view(-1, 1, 4)
                         num_points = flat_init_queries.shape[0]
                         if self.cfg.finetune_params.autoregressive:
-                            cond = finetune_target[i, j:j+latent.shape[0], :-1]
+                            if self.cfg.finetune_params.quantize_output_bins is not None:
+                                cond = torch.round(finetune_target[i, j:j+latent.shape[0], :-1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins
+                            else:
+                                cond = finetune_target[i, j:j+latent.shape[0], :-1]
                         else:
                             cond = flat_init_queries
-                        box_pred, frame_num = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), cond, frame_num=frame_num) # B x 256 x T x 
+
+                        if self.cfg.finetune_params.dit_head:
+                            z1 = finetune_target[i, j:j+latent.shape[0], 1:]
+                            z1 = z1.reshape(z1.shape[0]*z1.shape[1], z1.shape[2])
+                            z0 = torch.randn_like(z1)
+                            dit_z = (z0, z1)
+                            dit_z_diff_.append((z1-z0).view(cond.shape[0], cond.shape[1], -1))
+                        else:
+                            dit_z = None
+
+                        box_pred, frame_num = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), cond, frame_num=frame_num, dit_training=True, dit_z=dit_z) # B x 256 x T x 
                         box_pred_.append(box_pred)
+
+                    if self.cfg.finetune_params.dit_head:
+                        dit_z_diff = torch.cat(dit_z_diff_, dim=0)
+                        batch_dit_z_diff.append(dit_z_diff)
 
                     box_pred = torch.cat(box_pred_, dim=0)
                     batch_box_pred.append(box_pred)
 
                 box_pred = torch.stack(batch_box_pred, dim=0).squeeze(2)
+                if self.cfg.finetune_params.dit_head:
+                    dit_z_diff = torch.stack(batch_dit_z_diff, dim=0).squeeze(2)
             if self.cfg.finetune_params.zero_t_prediction:
                 loss = self.forward_loss(finetune_target, box_pred, additional_data=(init_queries, frame_num))
             elif self.cfg.finetune_params.autoregressive:
-                loss = self.forward_loss(finetune_target[:, :, 1:], box_pred, additional_data=init_queries)
+                if self.cfg.finetune_params.dit_head:
+                    loss = self.forward_loss(dit_z_diff, box_pred, additional_data=init_queries)
+                else:
+                    loss = self.forward_loss(finetune_target[:, :, 1:], box_pred, additional_data=init_queries)
             else:
                 loss = self.forward_loss(finetune_target, box_pred, additional_data=init_queries)
 
@@ -379,8 +454,13 @@ class FinetuneLitModule(LightningModule):
                 if "no-mask" in self.cfg.training_type:
                     latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                 if self.mode == "point-tracking":
-                    x_points_train = torch.cat([finetune_target[:, :, 0:1], x_points.clone()], dim=2)
-                    occlusions_pred_train = torch.cat([occluded_points[:, :, 0:1], occlusions_pred.clone()], dim=2)
+                    if self.cfg.finetune_params.quantize_output_bins is not None:
+                        x_points_train = torch.cat([torch.round(finetune_target[:, :, 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins, 
+                            torch.argmax(x_points, dim=-1) / self.cfg.finetune_params.quantize_output_bins], dim=2)
+                        occlusions_pred_train = torch.cat([occluded_points[:, :, 0:1], occlusions_pred.clone()], dim=2)
+                    else:
+                        x_points_train = torch.cat([finetune_target[:, :, 0:1], x_points.clone()], dim=2)
+                        occlusions_pred_train = torch.cat([occluded_points[:, :, 0:1], occlusions_pred.clone()], dim=2)
 
                     if self.cfg.finetune_params.batch_prediction:
                         if self.cfg.finetune_params.zero_t_prediction:
@@ -395,7 +475,11 @@ class FinetuneLitModule(LightningModule):
                             occlusions_pred_ = []
                             for j in range(0, init_queries.shape[1], latent.shape[0]):
                                 if self.cfg.finetune_params.autoregressive:
-                                    flat_init_queries = torch.cat([occluded_points[i, j:j+latent.shape[0], 0:1].unsqueeze(-1), finetune_target[i, j:j+latent.shape[0], 0:1]], dim=-1)
+                                    if self.cfg.finetune_params.quantize_output_bins is not None:
+                                        quantized_cond_target = torch.round(finetune_target[i, j:j+latent.shape[0], 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins
+                                        flat_init_queries = torch.cat([occluded_points[i, j:j+latent.shape[0], 0:1].unsqueeze(-1), quantized_cond_target], dim=-1)
+                                    else:
+                                        flat_init_queries = torch.cat([occluded_points[i, j:j+latent.shape[0], 0:1].unsqueeze(-1), finetune_target[i, j:j+latent.shape[0], 0:1]], dim=-1)
                                 else:
                                     flat_init_queries = init_queries[i, j:j+latent.shape[0]].view(-1, 1, 3)
                                 num_points = flat_init_queries.shape[0]
@@ -414,7 +498,7 @@ class FinetuneLitModule(LightningModule):
                             batch_occlusions_pred.append(occlusions_pred)
 
                         x_points = torch.stack(batch_x_points, dim=0).squeeze(2)
-                        occlusions_pred = torch.stack(batch_occlusions_pred, dim=0).squeeze()
+                        occlusions_pred = torch.stack(batch_occlusions_pred, dim=0).squeeze(2).squeeze(-1)
                     final_image_ = self.visualize_point_tracking(video, x_points, init_queries, finetune_target, occluded_points, occlusions_pred)
                     final_image_train_ = self.visualize_point_tracking(video, x_points_train, init_queries, finetune_target, occluded_points, occlusions_pred_train)
 
@@ -423,7 +507,11 @@ class FinetuneLitModule(LightningModule):
                     final_image_ = np.concatenate([final_image_train_, final_image_], axis=2)
                     final_image_ = [frame for frame in final_image_]
                 elif self.mode == "object-tracking":
-                    box_pred_train = torch.cat([finetune_target[:, :, 0:1], box_pred.clone()], dim=2)
+                    if self.cfg.finetune_params.quantize_output_bins is not None:
+                        box_pred_train = torch.cat([torch.round(finetune_target[:, :, 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins, 
+                                torch.argmax(box_pred, dim=-1) / self.cfg.finetune_params.quantize_output_bins], dim=2)
+                    else:
+                        box_pred_train = torch.cat([finetune_target[:, :, 0:1], box_pred.clone()], dim=2)
                     if self.cfg.finetune_params.batch_prediction:
                         if self.cfg.finetune_params.zero_t_prediction:
                             box_pred = self.encoder.forward_decoder_zero_t(latent, ids_restore, init_queries)
@@ -441,6 +529,9 @@ class FinetuneLitModule(LightningModule):
                                 if self.cfg.finetune_params.zero_t_prediction:
                                     box_pred = self.encoder.forward_decoder_zero_t(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), flat_init_queries)
                                 elif self.cfg.finetune_params.autoregressive:
+                                    if self.cfg.finetune_params.quantize_output_bins is not None:
+                                        flat_init_queries = torch.round(finetune_target[i, j:j+latent.shape[0], 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins
+
                                     box_pred = self.encoder.forward_decoder_autoreg(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), flat_init_queries)
                                 else:
                                     box_pred, frame_num = self.encoder.forward_decoder(latent[i:i+1].repeat(num_points, 1, 1), ids_restore[i:i+1].repeat(num_points, 1), flat_init_queries) # B x 256 x T x 2
@@ -467,7 +558,7 @@ class FinetuneLitModule(LightningModule):
                 clip.write_videofile(f"{self.cfg.storage_folder}/results/{train_}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
             if self.cfg.inference.testing:
-                title = "tapvid" if "eval" in self.cfg.training_type else "kubric"
+                title = "tapvid_typ" if "eval" in self.cfg.training_type else "kubric"
                 clip = ImageSequenceClip(final_image_, fps=1).resize(2)  # fps can be adjusted to your need
                 clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
@@ -621,12 +712,16 @@ class FinetuneLitModule(LightningModule):
             if extra["x_points"].shape[2] == target_points.shape[2] - 1:
                 target_points = target_points[:, :, 1:]
                 occluded = occluded[:, :, 1:]
+            if self.cfg.finetune_params.quantize_output_bins is not None and \
+                filtered_x_points.shape[-1] == self.cfg.finetune_params.quantize_output_bins:
+
+                filtered_x_points = torch.argmax(filtered_x_points, dim=-1) / self.cfg.finetune_params.quantize_output_bins
 
             self.test_mse.update(target_points.contiguous(), filtered_x_points.contiguous())
 
             # Update Jaccard metric
             pred_points = filtered_x_points
-            pred_visible = ~(extra.get("occluded_pred", torch.zeros_like(query_points[:,:,0])) > 0.5)
+            pred_visible = ~(extra.get("occluded_pred", torch.zeros_like(query_points[:,:,0])) > 0.5).squeeze(-1)
             true_points = target_points
             true_visible = ~(occluded>0.5)  # Assuming batch[3] contains occlusion information
             self.average_jaccard.update(pred_points, pred_visible, true_points, true_visible)
@@ -641,7 +736,10 @@ class FinetuneLitModule(LightningModule):
                 target_boxes = torch.cat([target_boxes[:, :, 0:1], target_boxes[:, :, frame_num:frame_num+1]], dim=2)
             if extra["box_pred"].shape[2] == target_boxes.shape[2] - 1:
                 target_boxes = target_boxes[:, :, 1:]
-
+            if self.cfg.finetune_params.quantize_output_bins is not None and \
+                extra["box_pred"].shape[-1] == self.cfg.finetune_params.quantize_output_bins:
+                
+                pred_boxes = torch.argmax(pred_boxes, dim=-1) / self.cfg.finetune_params.quantize_output_bins
             self.box_mse.update(target_boxes.contiguous(), pred_boxes.contiguous())
 
             # Update IoU metric
