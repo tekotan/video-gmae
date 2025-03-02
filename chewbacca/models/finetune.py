@@ -167,6 +167,7 @@ class FinetuneLitModule(LightningModule):
                                                                 new_readout_mode=self.cfg.finetune_params.new_readout_mode,
                                                                 zero_t_prediction = self.cfg.finetune_params.zero_t_prediction,
                                                                 autoregressive=self.cfg.finetune_params.autoregressive,
+                                                                quantized_prediction=self.cfg.finetune_params.quantized_prediction,
                                                                 quantize_output_bins=self.cfg.finetune_params.quantize_output_bins,
                                                                 dit_head=self.cfg.finetune_params.dit_head,
                                                             )
@@ -243,7 +244,7 @@ class FinetuneLitModule(LightningModule):
                 active_occluded_true = occluded_true[i, :first_invalid_index]
 
                 # Position loss using Huber loss instead of MSE
-                if self.cfg.finetune_params.quantize_output_bins is not None:
+                if self.cfg.finetune_params.quantized_prediction:
                     quantized_targets = torch.round(active_tracks_true * self.cfg.finetune_params.quantize_output_bins)\
                                         .type(torch.int64).clip(min=0, max=self.cfg.finetune_params.quantize_output_bins-1)
 
@@ -288,7 +289,7 @@ class FinetuneLitModule(LightningModule):
                     pred_boxes_clone = pred_boxes_clone[:first_invalid_index]
                     target_boxes_clone = target_boxes_clone[:first_invalid_index]
 
-                    if self.cfg.finetune_params.quantize_output_bins is not None:
+                    if self.cfg.finetune_params.quantized_prediction:
                         quantized_targets = torch.round(target_boxes_clone * self.cfg.finetune_params.quantize_output_bins)\
                                             .type(torch.int64).clip(min=0, max=self.cfg.finetune_params.quantize_output_bins-1)
                         for j in range(target_boxes_clone.shape[1]):
@@ -454,7 +455,7 @@ class FinetuneLitModule(LightningModule):
                 if "no-mask" in self.cfg.training_type:
                     latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                 if self.mode == "point-tracking":
-                    if self.cfg.finetune_params.quantize_output_bins is not None:
+                    if self.cfg.finetune_params.quantized_prediction:
                         x_points_train = torch.cat([torch.round(finetune_target[:, :, 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins, 
                             torch.argmax(x_points, dim=-1) / self.cfg.finetune_params.quantize_output_bins], dim=2)
                         occlusions_pred_train = torch.cat([occluded_points[:, :, 0:1], occlusions_pred.clone()], dim=2)
@@ -507,7 +508,7 @@ class FinetuneLitModule(LightningModule):
                     final_image_ = np.concatenate([final_image_train_, final_image_], axis=2)
                     final_image_ = [frame for frame in final_image_]
                 elif self.mode == "object-tracking":
-                    if self.cfg.finetune_params.quantize_output_bins is not None:
+                    if self.cfg.finetune_params.quantized_prediction:
                         box_pred_train = torch.cat([torch.round(finetune_target[:, :, 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins, 
                                 torch.argmax(box_pred, dim=-1) / self.cfg.finetune_params.quantize_output_bins], dim=2)
                     else:
@@ -712,7 +713,7 @@ class FinetuneLitModule(LightningModule):
             if extra["x_points"].shape[2] == target_points.shape[2] - 1:
                 target_points = target_points[:, :, 1:]
                 occluded = occluded[:, :, 1:]
-            if self.cfg.finetune_params.quantize_output_bins is not None and \
+            if self.cfg.finetune_params.quantized_prediction and \
                 filtered_x_points.shape[-1] == self.cfg.finetune_params.quantize_output_bins:
 
                 filtered_x_points = torch.argmax(filtered_x_points, dim=-1) / self.cfg.finetune_params.quantize_output_bins
@@ -736,7 +737,7 @@ class FinetuneLitModule(LightningModule):
                 target_boxes = torch.cat([target_boxes[:, :, 0:1], target_boxes[:, :, frame_num:frame_num+1]], dim=2)
             if extra["box_pred"].shape[2] == target_boxes.shape[2] - 1:
                 target_boxes = target_boxes[:, :, 1:]
-            if self.cfg.finetune_params.quantize_output_bins is not None and \
+            if self.cfg.finetune_params.quantized_prediction and \
                 extra["box_pred"].shape[-1] == self.cfg.finetune_params.quantize_output_bins:
                 
                 pred_boxes = torch.argmax(pred_boxes, dim=-1) / self.cfg.finetune_params.quantize_output_bins

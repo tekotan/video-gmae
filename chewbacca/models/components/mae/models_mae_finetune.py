@@ -197,7 +197,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_tracks=1000,
                  number_of_frames=2, reuse_decoder=False, num_fourier_features=16,
                  batch_prediction=True, new_readout_mode=True, zero_t_prediction=False,
-                 autoregressive=False, quantize_output_bins=None, dit_head=False):
+                 autoregressive=False, quantized_prediction=False, quantize_output_bins=None, dit_head=False):
         # Original initialization code preserved
         nn.Module.__init__(self)
         self.number_of_frames = number_of_frames
@@ -278,6 +278,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         self.zero_t_prediction = zero_t_prediction
         self.autoregressive = autoregressive
         self.quantize_output_bins = quantize_output_bins
+        self.quantized_prediction = quantized_prediction
         self.dit_head = dit_head
 
         if self.mode == "point-tracking":
@@ -285,7 +286,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 self.params_per_out = self.input_frames * self.output_size
                 self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
                 self.linear_cond = nn.Linear(self.cond_size, decoder_embed_dim)
-            elif self.quantize_output_bins is not None:
+            elif self.quantized_prediction:
                 self.params_per_out = (self.output_size - 1) * self.quantize_output_bins + 1
                 self.num_decoder_queries = self.input_frames
                 self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
@@ -298,7 +299,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 self.params_per_out = self.input_frames * self.output_size
                 self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
                 self.linear_cond = nn.Linear(self.cond_size, decoder_embed_dim)
-            elif self.quantize_output_bins is not None:
+            elif self.quantized_prediction:
                 self.params_per_out = self.output_size * self.quantize_output_bins
                 self.num_decoder_queries = self.input_frames
                 self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
@@ -562,7 +563,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 x_points = x_points.reshape(x_points.shape[0], 1, num_mask_repeat, -1)
 
             if self.mode == "point-tracking":
-                if self.quantize_output_bins is not None:
+                if self.quantized_prediction:
                     occluded = torch.nn.functional.sigmoid(x_points[:, :, :, -1])
                     x_points_x = x_points[:, :, :, :self.quantize_output_bins]
                     x_points_y = x_points[:, :, :, self.quantize_output_bins:self.quantize_output_bins*2]
@@ -572,7 +573,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                     x_points = x_points[:, :, :, :2]
                 return x_points, occluded, random_frame
             elif self.mode == "object-tracking":
-                if self.quantize_output_bins is not None:
+                if self.quantized_prediction:
                     bboxes_xmin = x_points[:, :, :, :self.quantize_output_bins]
                     bboxes_ymin = x_points[:, :, :, self.quantize_output_bins:self.quantize_output_bins*2]
                     bboxes_xmax = x_points[:, :, :, self.quantize_output_bins*2:self.quantize_output_bins*3]
@@ -625,8 +626,10 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 visibility.append(vis[:, :, -1:].unsqueeze(-1))
             elif self.mode == "object-tracking":
                 pred, _ = self.forward_decoder(x, ids_restore, cond_, limit_gaussian, frame_num=i, dit_training=False, dit_z=dit_z)
-            if self.quantize_output_bins is not None and not return_logits:
+            if self.quantized_prediction and not return_logits:
                 pred = (torch.argmax(pred, dim=-1) / self.quantize_output_bins)
+            if self.quantize_output_bins is not None:
+                pred = torch.round(pred * self.quantize_output_bins) / self.quantize_output_bins
 
             preds.append(pred[:, :, -1:])
 

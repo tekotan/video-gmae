@@ -5,7 +5,7 @@ hydra/launcher=submitit_slurm \
 launcher=slurm_em \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vit_base_ucf101_finetune_object_tracking_autoreg_dit_v1 \
+task_name=vit_base_ucf101_finetune_point_tracking_autoreg_dit_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -30,7 +30,7 @@ configs.dataset_type="video" \
 trainer.limit_train_batches=1000 \
 trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="train_ucf101_object-tracking_save-images_no-mask_random-frames" \
+configs.training_type="train_ucf101_point-tracking_save-images_no-mask_random-frames" \
 configs.weights_path="/home/jathu/3D/Chewbacca_test/logs/logs/GMAE_ucf101_test1/3/checkpoints/epoch_1561.ckpt" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \
@@ -43,6 +43,7 @@ configs.finetune_params.test=False \
 configs.finetune_params.zero_t_prediction=False \
 configs.finetune_params.autoregressive=True \
 configs.finetune_params.dit_head=True \
+configs.finetune_params.quantize_output_bins=1000 \
 configs.inference.testing=False
 
 # # !/bin/bash

@@ -269,5 +269,6 @@ configs:
         zero_t_prediction: False
         autoregressive: False
         quantize_output_bins: null
+        quantized_prediction: False
         dit_head: False
         test: False
