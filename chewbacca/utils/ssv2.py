@@ -24,6 +24,7 @@ for i in range(len(train)):
     file_name = f"/home/ubuntu/datasets/ssv2_2025-03-03_0001/20bn-something-something-v2/{train[i]['id']}.webm"
     label = lab[train[i]["template"].replace("[","").replace("]","")]
     labels.append([file_name, label])
+np.save(save_path, labels)
 
 save_path = "data/ssv2_val_label.npy"
 labels = []
