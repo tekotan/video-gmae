@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import transformers
-import xformers.ops as xops
+# import transformers
+# import xformers.ops as xops
 from einops import rearrange
 # from lart.models.components.tokeizers.tokenizer import Tokenizer
 from lightning import LightningModule
@@ -381,7 +381,7 @@ class GMAELitModule(LightningModule):
 
 
                 # save the masked images and reconstructed images
-                if "save-images" in self.cfg.training_type and batch_idx<1 or self.cfg.inference.testing and batch_idx % 50 == 0:
+                if "save-images" in self.cfg.training_type and batch_idx<1 or self.cfg.inference.testing and batch_idx == 0:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                     # renormalize to 0,1

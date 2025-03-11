@@ -21,7 +21,7 @@ beautifulsoup4==4.12.3
 bleach==6.2.0
 blobfile==3.0.0
 braceexpand==0.1.7
--e git+ssh://git@github.com/brjathu/Chewbacca_test.git@c5bda80106f9ef8651d782ea00dc85eb3eb42321#egg=chewbacca
+-e git+https://git@github.com/brjathu/Chewbacca_test.git@c5bda80106f9ef8651d782ea00dc85eb3eb42321#egg=chewbacca
 click==8.1.7
 cloudpickle==2.2.1
 colordict==1.2.6
@@ -106,7 +106,7 @@ jupyterlab_server==2.27.3
 jupyterlab_widgets==3.0.13
 keras==3.8.0
 kiwisolver==1.4.7
--e git+ssh://git@github.com/brjathu/chewbacca.git@8929d16ddd5e968277fa5b8ffd0e7ff4434ef719#egg=lart
+-e git+https://git@github.com/brjathu/chewbacca.git@8929d16ddd5e968277fa5b8ffd0e7ff4434ef719#egg=lart
 lazy_loader==0.4
 libclang==18.1.1
 lightning==2.4.0

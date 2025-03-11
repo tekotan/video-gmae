@@ -8,7 +8,8 @@ from random import shuffle
 
 os.makedirs("data", exist_ok=True)
 root_path = sys.argv[1] # root_path = "/datasets01/kinetics/092121/400/"
-videos = glob.glob(root_path + "/*.avi")
+videos = glob.glob(root_path + "/*/*.avi")
+print(len(videos))
 
 all_labels = list(set(map(lambda x: x.split("/")[-1].split("_")[1], videos)))
 print(len(videos))
