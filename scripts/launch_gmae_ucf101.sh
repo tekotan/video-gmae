@@ -28,14 +28,14 @@ configs.random_frames=True \
 configs.rgb_deltas=True \
 configs.mean_deltas=True \
 configs.num_classes=174 \
-configs.vocab_size=4096 \
+configs.vocab_size=256 \
 configs.dataset_type="video" \
-trainer.limit_train_batches=500 \
-trainer.limit_val_batches=50 \
+trainer.limit_train_batches=5000 \
+trainer.limit_val_batches=500 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="ssv2_gaussian_save-images-z_no-mask_random-frames" \
+configs.training_type="ucf101_gaussian_save-images-z_no-mask_random-frames" \
 configs.load_strict=False \
-configs.mask_ratio=0.90
+configs.mask_ratio=0.95
 # configs.rgb_deltas_scale=0.05,0.1,0.25 \
 
 
