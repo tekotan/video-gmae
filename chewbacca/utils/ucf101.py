@@ -10,9 +10,9 @@ os.makedirs("data", exist_ok=True)
 root_path = sys.argv[1] # root_path = "/datasets01/kinetics/092121/400/"
 videos = glob.glob(root_path + "/*/*.avi")
 print(len(videos))
-
+shuffle(videos)
 all_labels = list(set(map(lambda x: x.split("/")[-1].split("_")[1], videos)))
-print(len(videos))
+print(all_labels)
 
 save_path = "data/ucf101_train_label.npy"
 labels = []

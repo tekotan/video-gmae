@@ -5,7 +5,7 @@ import time
 
 def search_and_remove_core_dumps():
     # Directory to search for core dumps
-    search_directory = '/private/home/jathushan/3D/Chewbacca_test/'
+    search_directory = '/private/home/jathushan/3D/video_gmae/'
 
     while True:
         # Searching for core dump files in the directory
