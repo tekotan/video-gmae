@@ -95,6 +95,11 @@ class VideoDataModule(LightningDataModule):
             video_paths_val = np.load("data/ucf101_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
             self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+        elif "ssv2" in self.hparams.cfg.training_type:
+            video_paths_train = np.load("data/ssv2_train_label.npy")
+            video_paths_val = np.load("data/ssv2_val_label.npy")
+            self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
+            self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
         else:
             raise ValueError("Invalid Dataset Specification")
 
