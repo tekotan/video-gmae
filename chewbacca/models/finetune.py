@@ -801,7 +801,11 @@ class FinetuneLitModule(LightningModule):
             pred_visible = ~(extra.get("occluded_pred", torch.zeros_like(query_points[:,:,0])) > 0.5).squeeze(-1)
             true_points = target_points
             true_visible = ~(occluded>0.5)  # Assuming batch[3] contains occlusion information
-            self.average_jaccard.update(pred_points, pred_visible, true_points, true_visible)
+            self.average_jaccard.update(pred_points[:, :, self.cfg.inference.context_length:], 
+                                        pred_visible[:, :, self.cfg.inference.context_length:], 
+                                        true_points[:, :, self.cfg.inference.context_length:], 
+                                        true_visible[:, :, self.cfg.inference.context_length:]
+            )
         if self.mode == "object-tracking":
             loss_dict, extra, logits_cls = self.step(batch, batch_idx, return_images=True)
 
