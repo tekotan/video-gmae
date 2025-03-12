@@ -29,8 +29,6 @@ from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from chewbacca.utils import get_pylogger
 from chewbacca.utils.lamb import LARS, Lamb
 
-torch.set_float32_matmul_precision("medium")
-
 log = get_pylogger(__name__)
 
 
