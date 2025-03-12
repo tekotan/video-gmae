@@ -25,6 +25,7 @@ from torchmetrics.classification.accuracy import Accuracy
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.psnr import PeakSignalNoiseRatio
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
+import lpips
 
 from chewbacca.utils import get_pylogger
 from chewbacca.utils.lamb import LARS, Lamb
@@ -129,6 +130,9 @@ class GMAELitModule(LightningModule):
         self.test_ssim = StructuralSimilarityIndexMeasure()
         self.test_psnr = PeakSignalNoiseRatio()
         self.test_rfid = FrechetInceptionDistance()
+
+        if self.cfg.camera_jitter:
+            self.perceptual_loss = lpips.LPIPS(net='vgg')
 
         # create folders for storing results
         os.makedirs(self.cfg.storage_folder + "/results/", exist_ok=True)
@@ -372,6 +376,16 @@ class GMAELitModule(LightningModule):
                     x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
                     pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
                     loss = self.forward_loss(video, pred, mask, frame_num=random_frame, deltas=deltas, additional_data=None)
+                    if self.cfg.camera_jitter:
+                        import ipdb; ipdb.set_trace()
+                        imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
+                        imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
+                        imgs = (video * imagenet_std[None, :, None, None]) + imagenet_mean[None, :, None, None]
+                        gt = torch.cat([imgs_[:, :, 0:1], imgs_[:, :, frame_num:frame_num+1]], axis=2)
+                        jitter_pred = self.encoder.forward_render(x_points)
+                        loss += self.perceptual_loss(jitter_pred[:, :, 0], gt[:, :, 0])
+                        loss += self.perceptual_loss(jitter_pred[:, :, 1], gt[:, :, 1])
+
                 else:
                     x_points = self.encoder.forward_decoder(latent, ids_restore)
                     pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]

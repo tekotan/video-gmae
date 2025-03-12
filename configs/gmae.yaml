@@ -243,6 +243,10 @@ configs:
 
     deltas_reg_weight: 0.0
     random_frames: False
+    mean_deltas: True
+    rgb_deltas: False
+    rgb_deltas_scale: 1
+    camera_jitter: False
 
     drop_path: 0.0
     preload: 0

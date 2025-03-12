@@ -246,6 +246,7 @@ configs:
     mean_deltas: True
     rgb_deltas: False
     rgb_deltas_scale: 1
+    camera_jitter: False
 
     upsample_gaussians: []
     spawning: False
