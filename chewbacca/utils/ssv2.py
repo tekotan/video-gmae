@@ -21,7 +21,7 @@ with open("/home/ubuntu/datasets/ssv2_2025-03-03_0001/labels/train.json", "rb") 
 save_path = "data/ssv2_train_label.npy"
 labels = []
 for i in range(len(train)):
-    file_name = f"/home/ubuntu/datasets/ssv2_2025-03-03_0001/20bn-something-something-v2/{train[i]['id']}.webm"
+    file_name = f"/home/ubuntu/datasets/ssv2_2025-03-03_0001/20bn-something-something-v2-mp4/{train[i]['id']}.mp4"
     label = lab[train[i]["template"].replace("[","").replace("]","")]
     labels.append([file_name, label])
 np.save(save_path, labels)
@@ -29,7 +29,7 @@ np.save(save_path, labels)
 save_path = "data/ssv2_val_label.npy"
 labels = []
 for i in range(len(val)):
-    file_name = f"/home/ubuntu/datasets/ssv2_2025-03-03_0001/20bn-something-something-v2/{val[i]['id']}.webm"
+    file_name = f"/home/ubuntu/datasets/ssv2_2025-03-03_0001/20bn-something-something-v2-mp4/{val[i]['id']}.mp4"
     label = lab[val[i]["template"].replace("[","").replace("]","")]
     labels.append([file_name, label])
 

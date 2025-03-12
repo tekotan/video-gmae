@@ -50,8 +50,8 @@ class VideoDataset(Dataset):
         self.video_paths = video_paths
         self.good_videos = []
         self.flip_rgb = flip_rgb
-
         logger.info(f"Number of videos: {len(self.video_paths)}")
+        
 
     def __len__(self):
         return len(self.video_paths)
@@ -71,7 +71,7 @@ class VideoDataset(Dataset):
             num_frames = len(video_container)
             self.good_videos.append(data)
         except:
-            logger.info("error in reading a video frames." + video_path)
+            logger.info("error in reading a video frames (ds)." + video_path)
             if len(self.good_videos) > 0:
                 idx = random.sample(list(range(len(self.good_videos))), 1)[0]
                 data = self.good_videos[idx]
@@ -87,7 +87,7 @@ class VideoDataset(Dataset):
                     num_frames = len(video_container)
                     video_idx = 0
                 except:
-                    logger.info("error in reading a video frames.")
+                    logger.info("error in reading a video frames (a).")
                     num_frames = 0
                     return_0 = True
 
@@ -102,7 +102,7 @@ class VideoDataset(Dataset):
             frames_ = video_container.get_batch(frames)
             frames_ = frames_.asnumpy()
         except:
-            logger.info("error in reading a video frames.")
+            logger.info("error in reading a video frames (b).")
             # return a black image
             frames_ = np.random.randint(0, 255, (self.cfg.seq_length, self.cfg.input_size, self.cfg.input_size, 3), dtype=np.uint8)
 

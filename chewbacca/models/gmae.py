@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import transformers
-import xformers.ops as xops
+# import transformers
+# import xformers.ops as xops
 from einops import rearrange
 # from lart.models.components.tokeizers.tokenizer import Tokenizer
 from lightning import LightningModule
@@ -28,6 +28,8 @@ from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 
 from chewbacca.utils import get_pylogger
 from chewbacca.utils.lamb import LARS, Lamb
+
+torch.set_float32_matmul_precision("medium")
 
 log = get_pylogger(__name__)
 
@@ -117,7 +119,6 @@ class GMAELitModule(LightningModule):
         hsize = self.encoder.patch_embed.proj.weight.shape[0]
 
         self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
-
         # setup meters
         # for averaging loss across batches
         self.train_loss = MeanMetric()
@@ -137,7 +138,7 @@ class GMAELitModule(LightningModule):
         os.makedirs(self.cfg.storage_folder + "/videos/", exist_ok=True)
         log.info("Storage folder : " + self.cfg.storage_folder)
 
-        if(self.cfg.solver=="LARS" or self.cfg.solver=="LAMB"):
+        if(self.cfg.solver=="LARS" or self.cfg.solver=="LAMB" or "probe" in self.cfg.training_type):
             # freeze all layers except fc
             for _, p in self.encoder.named_parameters():
                 p.requires_grad = False
@@ -380,7 +381,7 @@ class GMAELitModule(LightningModule):
 
 
                 # save the masked images and reconstructed images
-                if "save-images" in self.cfg.training_type and batch_idx<1 or self.cfg.inference.testing and batch_idx % 50 == 0:
+                if "save-images" in self.cfg.training_type and batch_idx<1 and not self.training and (self.current_epoch+1)%10==0:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                     # renormalize to 0,1
@@ -429,7 +430,9 @@ class GMAELitModule(LightningModule):
                         title = "depth" if self.cfg.inference.depth else "corr" if  self.cfg.inference.correspondences else "test"
                         clip = ImageSequenceClip(final_image_, fps=1)  # fps can be adjusted to your need
                         clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
-
+            elif "probe" in self.cfg.training_type:
+                latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
+                loss = torch.tensor(0)
 
             # default return values
             # check if loss_index.mean is nan
@@ -577,7 +580,7 @@ class GMAELitModule(LightningModule):
             self.test_rfid.reset()
 
         # for linear probe accuracy on imagenet and k400, compute and log the accuracy
-        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type):
+        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type or "ssv2" in self.cfg.training_type):
             for i, layer_ in enumerate(self.linear_layer):
                 self.log("val/linear_probe_acc_" + str(i), self.val_acc[i].compute().item(), prog_bar=True, sync_dist=True)
                 log.info("Accuracy : " + str(self.val_acc[i].compute().item()))
