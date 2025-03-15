@@ -40,6 +40,47 @@ import cv2
 from gsplat import rasterization
 import matplotlib.pyplot as plt
 
+class CausalAttention(Attention):
+    def forward(self, x):
+
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.attn_drop.p if self.training else 0.,
+                is_causal=True
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            causal_mask = torch.tril(torch.ones(N, N, device=x.device)).unsqueeze(0).unsqueeze(0)
+            attn = attn.masked_fill(causal_mask == 0, float('-inf'))
+
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+class CausalBlock(Block):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Replace the attention module with the causal version
+        self.attn = CausalAttention(
+            dim=self.attn.qkv.in_features,
+            num_heads=self.attn.num_heads,
+            qkv_bias=self.attn.qkv.bias is not None,
+            attn_drop=self.attn.attn_drop.p,
+            proj_drop=self.attn.proj_drop.p
+        )
+
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
@@ -97,9 +138,13 @@ class MaskedAutoencoderViT(nn.Module):
             self.frame_pos_embed = nn.Parameter(torch.zeros(1, self.total_frames, decoder_embed_dim))
 
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        if not random_frames:
+            DecoderBlock = CausalBlock
+        else:
+            DecoderBlock = Block
 
         self.decoder_blocks = nn.ModuleList([
-            Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
+            DecoderBlock(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(decoder_depth)])
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
@@ -338,6 +383,7 @@ class MaskedAutoencoderViT(nn.Module):
             viewmat[:, :2, 3] = random_vector
         else:
             viewmat = self.viewmat.to(dtype=dtype).to(device=device)
+        
         self.Ks = self.Ks.to(dtype=dtype).to(device=device)
 
 
@@ -463,7 +509,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         return imgs_
         
-    def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_depth=False, return_corres=False):
+    def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_depth=False, return_corres=False, camera_jitter=False):
         init_imgs = []
         next_imgs = []
         gaussian_centers = []
@@ -471,7 +517,7 @@ class MaskedAutoencoderViT(nn.Module):
         for i in range(1, self.total_frames):
             with torch.no_grad():
                 x_points = self.forward_decoder(x, ids_restore, limit_gaussian=limit_gaussian, frame_num=i)
-                imgs_ = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_depth=return_depth, return_corres=return_corres).cpu()
+                imgs_ = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_depth=return_depth, return_corres=return_corres, camera_jitter=camera_jitter).cpu()
 
                 if return_corres:
                     gaussians = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_gaussians=True)[1]
