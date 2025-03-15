@@ -67,11 +67,21 @@ class VideoDataModule(LightningDataModule):
         # load and split datasets only if not loaded already
 
         # for evals
-        if "k400" in self.hparams.cfg.training_type:
+        if "k400-vjepa" in self.hparams.cfg.training_type:
+            from chewbacca.datamodules.components.video_datasets_vjepa import VideoDataset
+            self.data_train = VideoDataset(self.hparams.cfg, train=True, datasets_weights=None, frames_per_clip=self.hparams.cfg.seq_length, 
+                                            frame_step=4, num_clips=1, transform=None, shared_transform=None, random_clip_sampling=True, 
+                                            allow_clip_overlap=True, filter_short_videos=False, filter_long_videos=int(10**9), duration=None)
+            self.data_val = VideoDataset(self.hparams.cfg, train=False, datasets_weights=None, frames_per_clip=self.hparams.cfg.seq_length, frame_step=4, num_clips=1, 
+                                            transform=None, shared_transform=None, random_clip_sampling=True, allow_clip_overlap=True, filter_short_videos=False, 
+                                            filter_long_videos=int(10**9), duration=None)
+
+        elif "k400" in self.hparams.cfg.training_type:
             video_paths_train = np.load("data/kinetics_400_train_label.npy")
             video_paths_val = np.load("data/kinetics_400_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
             self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+
         elif "ego4d" in self.hparams.cfg.training_type:
             video_paths_train = np.load("data/ego4d_train_label.npy")
             video_paths_val = np.load("data/ego4d_val_label.npy")

@@ -54,6 +54,28 @@ def gpu_mem_usage():
     return mem_usage_bytes / 1024 / 1024
 
 
+class attntion_probe(nn.Module):
+    def __init__(self, num_heads, in_dim, out_dim):
+        super().__init__()
+        self.num_heads = num_heads
+        self.q_ = nn.Parameter(torch.randn(1, out_dim//num_heads))
+        self.wk = nn.Linear(in_dim, out_dim)
+        self.wv = nn.Linear(in_dim, out_dim)
+        self.scale = 1 / (out_dim // num_heads) ** 0.5
+
+    def forward(self, x):
+        # implements multi-head attention with fixed query
+        # x: (N, L, D)
+        k = self.wk(x).view(x.shape[0], x.shape[1], self.num_heads, -1).transpose(1, 2)
+        v = self.wv(x).view(x.shape[0], x.shape[1], self.num_heads, -1).transpose(1, 2)
+        q = self.q_.unsqueeze(0)[:, :, None, :].repeat(1, 1, self.num_heads, 1) * self.scale
+        attn = torch.einsum('nlhd,nhkd->nhlk', q, k)
+        attn = attn.softmax(dim=-1)
+        attn_output = torch.einsum('nhlk,nhkd->nhld', attn, v)
+        attn_output = attn_output.transpose(1, 2).view(x.shape[0], -1)
+        return attn_output
+
+
 class GMAELitModule(LightningModule):
     """
     Lightning module for training GPT models.
@@ -71,7 +93,7 @@ class GMAELitModule(LightningModule):
         self.save_hyperparameters(logger=False,)
         self.cfg = self.hparams.cfg
 
-        self.num_frames = self.cfg.seq_length if self.cfg.dataset_type=="video" else 1
+        self.num_frames = self.cfg.seq_length if (self.cfg.dataset_type=="video" or self.cfg.dataset_type=="video-vjepa") else 1
 
         if self.cfg.dataset_type=="imagenet":
             if "mae" in self.cfg.training_type:
@@ -117,7 +139,11 @@ class GMAELitModule(LightningModule):
         num_hidden_layers = len(self.encoder.blocks)
         hsize = self.encoder.patch_embed.proj.weight.shape[0]
 
-        self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
+        if "attn" in self.cfg.training_type:
+            self.linear_layer = nn.ModuleList([torch.nn.Sequential(attntion_probe(8, hsize, hsize), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
+        else:
+            self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
+        
         # setup meters
         # for averaging loss across batches
         self.train_loss = MeanMetric()
@@ -371,6 +397,10 @@ class GMAELitModule(LightningModule):
                         mask_ = (np.random.rand() + 1)/2
                 else:
                     mask_ = self.cfg.mask_ratio
+
+                if not self.training:
+                    mask_ = 0.0
+
                 latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=mask_)
                 if self.cfg.random_frames:
                     x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
@@ -459,8 +489,12 @@ class GMAELitModule(LightningModule):
             # for linear probe
             labels_ = batch[1]
             for i in range(len(latent_layers)):
-                cls_token = latent_layers[i].mean(1)
-                logits__ = self.linear_layer[i](cls_token.detach())
+                if "attn" in self.cfg.training_type:
+                    cls_token = latent_layers[i]
+                    logits__ = self.linear_layer[i](cls_token.detach())
+                else:
+                    cls_token = latent_layers[i].mean(1)
+                    logits__ = self.linear_layer[i](cls_token.detach())
                 if torch.sum(labels!=-1)>0:
                     if "cls-label-smooth" in self.cfg.training_type:
                         value_ = float(self.cfg.training_type.split("cls-label-smooth")[1].split("_")[0])
@@ -475,6 +509,70 @@ class GMAELitModule(LightningModule):
             logits_["logits_cls"] = logits_cls
 
             return loss_dict, extras_, logits_
+
+        elif self.cfg.video_source=="video-vjepa":
+
+            if "rand-mask" in self.cfg.training_type:
+                p_ = np.random.rand()
+                if p_ < 0.7:
+                    mask_ = 0.9
+                else:
+                    mask_ = (np.random.rand() + 1)/2
+            else:
+                mask_ = self.cfg.mask_ratio
+
+            if not self.training:
+                mask_ = 0.0
+
+            number_of_vides_perclip = len(batch[0])
+            labels = batch[1]   
+            clip_logits = []
+            device = batch[0][0][0].device
+            dtype = batch[0][0][0].dtype
+            B = batch[0][0][0].shape[0]
+
+
+            for clip in range(number_of_vides_perclip):
+                video = batch[0][clip][0] # bs, 3, t, h, w
+                latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=mask_)
+                if self.cfg.random_frames:
+                    x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
+                    pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
+                    loss = self.forward_loss(video, pred, mask, frame_num=random_frame, deltas=deltas, additional_data=None)
+                else:
+                    x_points = self.encoder.forward_decoder(latent, ids_restore)
+                    pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
+                    loss = self.forward_loss(video, pred, mask, deltas=deltas, additional_data=None)
+
+                logits_ = torch.stack(latent_layers, dim=0)
+                clip_logits.append(logits_)
+
+            clip_logits_ = torch.stack(clip_logits, dim=2)#.view(logits_.shape[0], -1, logits_.shape[2])
+            logits_cls = []
+            loss_dict = {}
+            for i, layer_ in enumerate(self.linear_layer):
+                if "attn" in self.cfg.training_type:
+                    out_ = clip_logits_[i].view(B, -1, clip_logits_.shape[-1])
+                else:
+                    out_ = clip_logits_[i].view(B, -1, clip_logits_.shape[-1]).mean(dim=1)
+                logits = layer_(out_.detach())
+                if torch.sum(labels!=-1)>0:
+                    loss_cls = F.cross_entropy(logits[labels!=-1], labels[labels!=-1].to(device=device))
+                    loss_dict["loss_cls_" + str(i)] = loss_cls
+                    logits_cls.append(logits)
+                    if i == len(self.linear_layer)-1:
+                        loss_dict["loss"] = loss_cls
+                else:
+                    loss_dict["loss_cls_" + str(i)] = torch.tensor(0).to(device=device).to(dtype=dtype)
+                    logits_cls.append([])
+                    if i == len(self.linear_layer)-1:
+                        loss_dict["loss"] = torch.tensor(0).to(device=device).to(dtype=dtype)
+            extras_    = {}
+            logits_    = {}
+            logits_["logits_cls"] = logits_cls
+            return loss_dict, extras_, logits_
+
+
 
     def on_train_epoch_start(self) -> None:
         torch.cuda.empty_cache()
@@ -516,7 +614,7 @@ class GMAELitModule(LightningModule):
             self.generate(batch, batch_idx)
             return {"loss": 0}
 
-        if "mae" in self.cfg.training_type or "vit" in self.cfg.training_type or self.cfg.dataset_type=="video":
+        if "mae" in self.cfg.training_type or "vit" in self.cfg.training_type or self.cfg.dataset_type=="video" or self.cfg.dataset_type=="video-vjepa":
             loss_dict, extra, logits_cls = self.step(batch, batch_idx, return_images=False)
         else:
             loss_dict, extra, logits_cls, pred = self.step(batch, batch_idx, return_images=True)
@@ -569,7 +667,7 @@ class GMAELitModule(LightningModule):
     def on_validation_epoch_end(self):
         log.info("\n " + self.cfg.storage_folder +  " : Validation epoch " + str(self.current_epoch) + " ended.")
 
-        if "mae" not in self.cfg.training_type and "vit" not in self.cfg.training_type and self.cfg.dataset_type!="video":
+        if "mae" not in self.cfg.training_type and "vit" not in self.cfg.training_type and self.cfg.dataset_type!="video" and self.cfg.dataset_type!="video-vjepa":
 
             total_mse = self.test_mse.compute()
             self.log(f"mse", total_mse, sync_dist=True)
