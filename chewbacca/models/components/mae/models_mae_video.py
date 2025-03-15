@@ -304,7 +304,7 @@ class MaskedAutoencoderViT(nn.Module):
             return x_points, random_frame
         return x_points
     
-    def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False, return_corres=False):
+    def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False, return_corres=False, camera_jitter=False):
         if limit_gaussian > 0:
             limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab * np.prod(self.upsample_gaussians)))
         else:
@@ -330,8 +330,14 @@ class MaskedAutoencoderViT(nn.Module):
 
         rgbs = x_points[:, :, 10:13]
         opacities = x_points[:, :, 13:14]
-
-        self.viewmat = self.viewmat.to(dtype=dtype).to(device=device)
+        if camera_jitter:
+            viewmat = self.viewmat.clone().to(dtype=dtype).to(device=device)
+            random_r = torch.rand(())
+            random_theta = torch.rand(()) * 2 * torch.pi
+            random_vector = torch.tensor([random_r * torch.cos(random_theta), random_r * torch.sin(random_theta)]).to(dtype=dtype).to(device=device)
+            viewmat[:, :2, 3] = random_vector
+        else:
+            viewmat = self.viewmat.to(dtype=dtype).to(device=device)
         self.Ks = self.Ks.to(dtype=dtype).to(device=device)
 
 
@@ -348,9 +354,9 @@ class MaskedAutoencoderViT(nn.Module):
             means_ = means_.float()
             scales_ = scales_.float()
             quats_ = quats_.float()
-            self.viewmat = self.viewmat.float()
+            viewmat = viewmat.float()
 
-            radii, xys, depths, conics, _ = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
+            radii, xys, depths, conics, _ = fully_fused_projection(means_, None, quats_, scales_, viewmat, self.Ks, self.W, self.H)
             
             rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0)
 
@@ -389,7 +395,7 @@ class MaskedAutoencoderViT(nn.Module):
             tile_width = math.ceil(self.W / float(self.tile_size))
             tile_height = math.ceil(self.H / float(self.tile_size))
             tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
-            isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
+            isect_offsets = isect_offset_encode(isect_ids, viewmat.shape[0], tile_width, tile_height)
             render_colors, render_alphas = rasterize_to_pixels(xys, conics, torch.sigmoid(rgbs_), torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
             out_img = render_colors * render_alphas + (1.0 - render_alphas)
             out_img = out_img.squeeze()
@@ -405,7 +411,7 @@ class MaskedAutoencoderViT(nn.Module):
                     means_ = means_ + means_delta
                 # scales_ = scales_ + scales_delta
                 # quats_ = quats_ + quats_delta
-                radii, xys, depths, conics, compensations = fully_fused_projection(means_, None, quats_, scales_, self.viewmat, self.Ks, self.W, self.H)
+                radii, xys, depths, conics, compensations = fully_fused_projection(means_, None, quats_, scales_, viewmat, self.Ks, self.W, self.H)
 
                 if self.rgb_deltas:
                     rgbs_delta = rgbs[i][j*limit_gaussian:(j+1)*limit_gaussian].unsqueeze(0)
@@ -437,7 +443,7 @@ class MaskedAutoencoderViT(nn.Module):
                 tile_width = math.ceil(self.W / float(self.tile_size))
                 tile_height = math.ceil(self.H / float(self.tile_size))
                 tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(xys, radii, depths, self.tile_size, tile_width, tile_height)
-                isect_offsets = isect_offset_encode(isect_ids, self.viewmat.shape[0], tile_width, tile_height)
+                isect_offsets = isect_offset_encode(isect_ids, viewmat.shape[0], tile_width, tile_height)
                 render_colors, render_alphas = rasterize_to_pixels(xys, conics, rgbs_, torch.sigmoid(opacities_), self.W, self.H, self.tile_size, isect_offsets, flatten_ids, absgrad=True)
                 out_img = render_colors * render_alphas + (1.0 - render_alphas)
                 out_img = out_img.squeeze()
