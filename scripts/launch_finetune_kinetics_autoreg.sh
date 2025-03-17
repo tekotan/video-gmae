@@ -1,11 +1,9 @@
 # !/bin/bash
 python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
-hydra/launcher=submitit_slurm \
-launcher=slurm_em \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vit_base_kinetics_finetune_point_tracking_dit_v1 \
+task_name=vit_base_kinetics_finetune_object_tracking_dit_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -30,7 +28,7 @@ configs.dataset_type="video" \
 trainer.limit_train_batches=1000 \
 trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="train_ucf101_point-tracking_save-images_no-mask_random-frames" \
+configs.training_type="train_ucf101_object-tracking_save-images_no-mask_random-frames" \
 configs.weights_path="/home/jathu/gmae_logs/a_vit_base_pretraining_test2/0/checkpoints/epoch_749.ckpt" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \

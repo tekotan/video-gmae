@@ -394,7 +394,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             z0, _ = dit_z
             steps = 10
             for i in range(steps):
-                t = torch.rand(B, device=x.device) * 0 + i / steps
+                t = torch.rand(B*T, device=x.device) * 0 + i / steps
                 t_emb = self.timestep_embed(t)
 
                 out_z = self.dit_out(z0, t_emb, x.reshape(B * T, self.decoder_embed_dim))

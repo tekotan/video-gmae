@@ -101,6 +101,7 @@ class VideoDataModule(LightningDataModule):
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
             self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
         elif "ucf101" in self.hparams.cfg.training_type:
+            from chewbacca.datamodules.components.video_dataset import VideoDataset
             video_paths_train = np.load("data/ucf101_train_label.npy")
             video_paths_val = np.load("data/ucf101_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
