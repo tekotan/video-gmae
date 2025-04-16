@@ -72,11 +72,10 @@ class PointTrackingEvalDataset(IterableDataset):
         self,
         pickle_files,  # List[str]
         cfg,
-        bin_size=24,
     ):
         super().__init__()
         self.cfg = cfg
-        self.bin_size = bin_size
+        self.bin_size = min(24, self.cfg.seq_length)
         self.all_items = []
 
         for pkl_file in pickle_files:
@@ -98,7 +97,7 @@ class PointTrackingEvalDataset(IterableDataset):
                 raise ValueError(
                     f"Unsupported pickle structure in {pkl_file}. Must be dict or list."
                 )
-        self.resize_transform = transforms.Resize(128)
+        self.resize_transform = transforms.Resize(256)
         # Debug break if needed
         print("Loaded {} video items.".format(len(self.all_items)))
 
