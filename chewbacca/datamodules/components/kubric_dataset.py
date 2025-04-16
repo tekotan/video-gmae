@@ -1081,10 +1081,11 @@ class KubricPointTrackingDataset(IterableDataset):
     def __iter__(self):
       for sample in self.generator:
           # sample is a dict with keys: "video", "query_points", "target_points", ...
-          video_np = sample["video"]               # shape: (24, 256, 256, 3)
+          num_frames = min(self.cfg.seq_length, 24)
+          video_np = sample["video"][:num_frames]               # shape: (24, 256, 256, 3)
           query_points_np = sample["query_points"] # shape: (256, 3)
-          target_points_np = sample["target_points"] # shape: (256, 24, 2)
-          occluded_points_np = sample["occluded"].astype(float)  # shape: (256, 24)
+          target_points_np = sample["target_points"][:, :num_frames] # shape: (256, 24, 2)
+          occluded_points_np = sample["occluded"].astype(float)[:, :num_frames]  # shape: (256, 24)
 
           # Convert to torch
 

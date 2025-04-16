@@ -72,11 +72,10 @@ class PointTrackingEvalDataset(IterableDataset):
         self,
         pickle_files,  # List[str]
         cfg,
-        bin_size=24,
     ):
         super().__init__()
         self.cfg = cfg
-        self.bin_size = bin_size
+        self.bin_size = min(24, self.cfg.seq_length)
         self.all_items = []
 
         for pkl_file in pickle_files:

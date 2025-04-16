@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn.functional as F
+from transformers import VideoMAEModel
 
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
@@ -200,24 +201,28 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                  number_of_frames=2, reuse_decoder=False, num_fourier_features=16,
                  batch_prediction=True, new_readout_mode=True, zero_t_prediction=False,
                  autoregressive=False, quantized_prediction=False, quantize_output_bins=None, dit_head=False,
-                 use_dit_decoder=False):
+                 use_dit_decoder=False, videomae=False):
         # Original initialization code preserved
         nn.Module.__init__(self)
         self.number_of_frames = number_of_frames
         self.total_frames = number_of_frames
-
+        self.videomae = videomae
+        
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
-
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, embed_dim), requires_grad=False)
-
-        self.blocks = nn.ModuleList([
-                Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
-                for i in range(depth)])
-
-        self.blocks.requires_grad = False
         self.patch_embed.requires_grad = False
+
+        if self.videomae:
+            self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-large")
+        else:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, embed_dim), requires_grad=False)
+
+            self.blocks = nn.ModuleList([
+                    Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
+                    for i in range(depth)])
+                    
+            self.blocks.requires_grad = False
 
         self.norm = norm_layer(embed_dim)
         self.num_layers = depth
@@ -232,18 +237,23 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             self.cond_size = 4
             self.output_size = 4
             self.input_frames = 32
+
         elif self.mode == "point-tracking":
             self.cond_size = 3
             self.output_size = 3
             self.input_frames = 24
+        
+        if self.videomae:
+            self.input_frames = 16
 
         if new_readout_mode:
+            enc_tokens = 49 * self.input_frames * 2 if self.videomae else 64 * 32 * self.cond_size #49 * self.input_frames
             self.readout = CrossAttentionReadout(
                 embed_dim=embed_dim,
                 cond_size=self.cond_size,
                 output_size=self.output_size,
                 num_heads=8,
-                num_enc_tokens=49 * self.input_frames,
+                num_enc_tokens=enc_tokens,
                 num_input_frames=self.input_frames,
                 num_fourier_features=num_fourier_features
             )
@@ -341,16 +351,18 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
 
     def initialize_weights(self):
         # Original initialization code preserved
-        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        if not self.videomae:
+            pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
+            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+            w = self.patch_embed.proj.weight.data
+            torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
 
         if not self.new_readout_mode:
             decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
             self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
 
-        w = self.patch_embed.proj.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-
+        
         torch.nn.init.normal_(self.cls_token, std=.02)
         if not self.new_readout_mode:
             if not self.reuse_decoder:
@@ -362,23 +374,30 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
 
     def forward_encoder(self, x, mask_ratio):
         # Original encoder code preserved
-        x_ = []
-        for a in range(x.shape[2]):
-            x_.append(self.patch_embed(x[:, :, a, :, :]))
-        x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
-        x_ = rearrange(x_, 'n t c d -> n (t c) d')
+        if self.videomae:
+            out = self.videomae_model(pixel_values=x.permute(0,2,1,3,4), output_hidden_states=True)
+            x = out["last_hidden_state"]
+            latents = out["hidden_states"]
+            ids_restore = torch.arange(x.shape[1]).unsqueeze(0).repeat(x.shape[0], 1).to(x.device)
+            return x, None, ids_restore, latents
+        else:
+            x_ = []
+            for a in range(x.shape[2]):
+                x_.append(self.patch_embed(x[:, :, a, :, :]))
+            x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
+            x_ = rearrange(x_, 'n t c d -> n (t c) d')
 
-        x = x_ + self.pos_embed[:, :self.input_frames*self.patch_embed.num_patches]
+            x = x_ + self.pos_embed[:, :self.input_frames*self.patch_embed.num_patches]
 
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
 
-        latents = []
-        for blk in self.blocks:
-            x = blk(x)
-            latents.append(x)
-        x = self.norm(x)
+            latents = []
+            for blk in self.blocks:
+                x = blk(x)
+                latents.append(x)
+            x = self.norm(x)
 
-        return x, mask, ids_restore, latents
+            return x, mask, ids_restore, latents
     def dit_step(self, x, dit_z, dit_training=True):
         B = x.shape[0]
         T = x.shape[1]
@@ -524,7 +543,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             else:
                 x_ = self.decoder_embed(x)
                 mask_tokens = self.mask_token.repeat(x_.shape[0], num_mask_repeat, 1)
-
+                
             ids_shuffle = torch.argsort(ids_restore, dim=1)
             ids_shuffle = ids_shuffle[:, :x_.shape[1]]
             p_ = torch.gather(self.decoder_pos_embed[:, :, :].repeat(x_.shape[0], 1, 1), dim=1, index=ids_shuffle.unsqueeze(-1).repeat(1, 1, self.decoder_pos_embed.shape[2]))
