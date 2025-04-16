@@ -246,11 +246,14 @@ configs:
     mean_deltas: True
     rgb_deltas: False
     rgb_deltas_scale: 1
+    camera_jitter: False
+    joint_random_frames: 1
+    pairwise_random_frames: False
+    
 
     upsample_gaussians: []
     spawning: False
     frame_zero: False
-    camera_jitter: False
 
     drop_path: 0.0
     preload: 0

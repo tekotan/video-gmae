@@ -90,12 +90,14 @@ class MaskedAutoencoderViT(nn.Module):
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, 
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
                  deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
-                 rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False):
+                 rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False,
+                 pairwise_random_frames=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
         self.deltas_reg_weight = deltas_reg_weight
         self.random_frames = random_frames
+        self.pairwise_random_frames = pairwise_random_frames
         self.mean_deltas = mean_deltas
         self.rgb_deltas = rgb_deltas
         self.rgb_deltas_scale = rgb_deltas_scale
@@ -334,8 +336,16 @@ class MaskedAutoencoderViT(nn.Module):
         x_ = x_ + p_
         mask_tokens = self.mask_token.repeat(x_.shape[0], self.num_points*self.number_of_frames, 1) + self.decoder_pos_embed_gaussian
         if self.random_frames:
-            random_frame = torch.randint(low=1, high=self.total_frames, size=()) if not frame_num else frame_num
-            frame_token = self.frame_pos_embed[:, random_frame:random_frame+1, :].repeat(x_.shape[0], 1, 1)
+            if self.pairwise_random_frames:
+                rf_1 = torch.randint(low=0, high=self.total_frames, size=()) if not frame_num else frame_num[0]
+                rf_2 = torch.randint(low=0, high=self.total_frames, size=()) if not frame_num else frame_num[1]
+                ft_1 = self.frame_pos_embed[:, rf_1:rf_1+1, :].repeat(x_.shape[0], 1, 1)
+                ft_2 = self.frame_pos_embed[:, rf_2:rf_2+1, :].repeat(x_.shape[0], 1, 1)
+                frame_token = torch.cat([ft_1, ft_2], dim=1)
+                random_frame = (rf_1, rf_2)
+            else:
+                random_frame = torch.randint(low=1, high=self.total_frames, size=()) if not frame_num else frame_num
+                frame_token = self.frame_pos_embed[:, random_frame:random_frame+1, :].repeat(x_.shape[0], 1, 1)
             x_points = self.decoder_step(x_, mask_tokens, frame_token=frame_token)                
         else:
             x_points = self.decoder_step(x_, mask_tokens, frame_token=None)
@@ -392,7 +402,6 @@ class MaskedAutoencoderViT(nn.Module):
 
         for i in range(means.shape[0]):
             images_per_video = []
-            # render first image
             means_ = means[i].contiguous().view(-1, 3)[:limit_gaussian]
             scales_ = scales[i].contiguous().view(-1, 3)[:limit_gaussian]
             quats_ = quats[i].contiguous().view(-1, 4)[:limit_gaussian]
@@ -516,7 +525,13 @@ class MaskedAutoencoderViT(nn.Module):
 
         for i in range(1, self.total_frames):
             with torch.no_grad():
-                x_points = self.forward_decoder(x, ids_restore, limit_gaussian=limit_gaussian, frame_num=i)
+                if self.pairwise_random_frames:
+                    random_first_frame = torch.randint(low=0, high=i, size=())
+                    frame_num = (random_first_frame.item(), i)
+                else:
+                    frame_num = i
+
+                x_points = self.forward_decoder(x, ids_restore, limit_gaussian=limit_gaussian, frame_num=frame_num)
                 imgs_ = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_depth=return_depth, return_corres=return_corres, camera_jitter=camera_jitter).cpu()
 
                 if return_corres:

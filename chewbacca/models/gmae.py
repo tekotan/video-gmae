@@ -132,7 +132,8 @@ class GMAELitModule(LightningModule):
                                                                     rgb_deltas_scale=self.cfg.rgb_deltas_scale,
                                                                     upsample_gaussians=self.cfg.upsample_gaussians,
                                                                     spawning=self.cfg.spawning,
-                                                                    frame_zero=self.cfg.frame_zero
+                                                                    frame_zero=self.cfg.frame_zero,
+                                                                    pairwise_random_frames=self.cfg.pairwise_random_frames
                                                                 )
             
         
@@ -222,7 +223,12 @@ class GMAELitModule(LightningModule):
                         loss += (loss_ * mask[i]).sum() / mask.sum()  # mean loss on removed patches
                 else:
                     if self.cfg.random_frames and frame_num is not None:
-                        loss += torch.nn.functional.mse_loss(torch.cat([imgs_[i][:, 0:1], imgs_[i][:, frame_num:frame_num+1]], axis=1), 
+                        if self.cfg.pairwise_random_frames:
+                            t1, t2 = frame_num
+                        else:
+                            t1 = 0
+                            t2 = frame_num
+                        loss += torch.nn.functional.mse_loss(torch.cat([imgs_[i][:, t1:t1+1], imgs_[i][:, t2:t2+1]], axis=1), 
                                                         pred[i].permute(3, 0, 1, 2)) # 0, t
                         # loss += torch.nn.functional.mse_loss(imgs_[i][:, frame_num-1:frame_num+1], pred[i].permute(3, 0, 1, 2)) # t, t+1
 
@@ -409,6 +415,14 @@ class GMAELitModule(LightningModule):
                     x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
                     pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
                     loss = self.forward_loss(video, pred, mask, frame_num=random_frame, deltas=deltas, additional_data=None)
+                    if self.cfg.joint_random_frames > 1:
+                        for k in range(1, self.cfg.joint_random_frames):
+                            x_points_, random_frame = self.encoder.forward_decoder(latent, ids_restore)
+                            B, N, _ = x_points_.shape
+                            loss += F.mse_loss(x_points_[:, :N//2], x_points[:, :N//2]) * 0.5
+                            pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)
+                            loss += self.forward_loss(video, pred, mask, frame_num=random_frame, deltas=deltas, additional_data=None)
+                        loss /= self.cfg.joint_random_frames
                     if self.cfg.camera_jitter:
                         imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
                         imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
@@ -693,7 +707,8 @@ class GMAELitModule(LightningModule):
             self.test_rfid.reset()
 
         # for linear probe accuracy on imagenet and k400, compute and log the accuracy
-        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type or "ssv2" in self.cfg.training_type):
+        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type or 
+            "ssv2" in self.cfg.training_type or "kinetics" in self.cfg.training_type):
             for i, layer_ in enumerate(self.linear_layer):
                 self.log("val/linear_probe_acc_" + str(i), self.val_acc[i].compute().item(), prog_bar=True, sync_dist=True)
                 log.info("Accuracy : " + str(self.val_acc[i].compute().item()))

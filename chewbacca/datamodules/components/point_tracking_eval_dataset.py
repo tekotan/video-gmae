@@ -98,7 +98,8 @@ class PointTrackingEvalDataset(IterableDataset):
                 raise ValueError(
                     f"Unsupported pickle structure in {pkl_file}. Must be dict or list."
                 )
-        self.resize_transform = transforms.Resize(128)
+        nearest_power_of_two = 2 ** int(np.ceil(np.log2(self.cfg.input_size)))
+        self.resize_transform = transforms.Resize(nearest_power_of_two)
         # Debug break if needed
         print("Loaded {} video items.".format(len(self.all_items)))
 
