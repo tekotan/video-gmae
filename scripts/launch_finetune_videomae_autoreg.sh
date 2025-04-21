@@ -3,12 +3,12 @@ python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vit_large_videomae_finetune_point_tracking_crossattn_v1 \
+task_name=vit_base_videomae_finetune_object_tracking_crossattn_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="finetune" \
-configs.model_name="finetune_vit_large_patch16" \
+configs.model_name="finetune_vit_base_patch16" \
 configs.input_size=224 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
@@ -28,7 +28,7 @@ configs.dataset_type="video" \
 trainer.limit_train_batches=1000 \
 trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="train_ucf101_point-tracking_save-images_no-mask_random-frames" \
+configs.training_type="train_ucf101_object-tracking_save-images_no-mask_random-frames" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \
 configs.finetune_params.reuse_decoder=False \

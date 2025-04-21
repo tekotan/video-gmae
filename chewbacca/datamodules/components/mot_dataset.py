@@ -46,6 +46,7 @@ class VideoAnnotationDataset(Dataset):
         for video_path in self.video_infos:
             video_id = os.path.splitext(os.path.basename(video_path[0]))[0]
             annot_path = os.path.join(self.root_dir, video_id, "gt", "gt.txt")
+            import ipdb; ipdb.set_trace()
             if os.path.exists(annot_path):
                 self.annotations[video_id] = self._load_annotations(annot_path)
             else:

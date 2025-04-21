@@ -133,11 +133,16 @@ class GMAELitModule(LightningModule):
                                                                     upsample_gaussians=self.cfg.upsample_gaussians,
                                                                     spawning=self.cfg.spawning,
                                                                     frame_zero=self.cfg.frame_zero,
-                                                                    pairwise_random_frames=self.cfg.pairwise_random_frames
+                                                                    pairwise_random_frames=self.cfg.pairwise_random_frames,
+                                                                    videomae=self.cfg.videomae,
                                                                 )
             
         
-        num_hidden_layers = len(self.encoder.blocks)
+        if self.cfg.videomae:
+            num_hidden_layers = len(self.encoder.videomae_model.encoder.layer) + 1
+        else:
+            num_hidden_layers = len(self.encoder.blocks)
+            
         hsize = self.encoder.patch_embed.proj.weight.shape[0]
 
         if "attn" in self.cfg.training_type:

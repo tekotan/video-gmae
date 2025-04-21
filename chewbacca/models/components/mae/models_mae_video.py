@@ -40,6 +40,9 @@ import cv2
 from gsplat import rasterization
 import matplotlib.pyplot as plt
 
+from transformers import VideoMAEModel
+
+
 class CausalAttention(Attention):
     def forward(self, x):
 
@@ -91,7 +94,7 @@ class MaskedAutoencoderViT(nn.Module):
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
                  deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
                  rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False,
-                 pairwise_random_frames=False):
+                 pairwise_random_frames=False, videomae=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
@@ -104,25 +107,32 @@ class MaskedAutoencoderViT(nn.Module):
         self.upsample_gaussians = upsample_gaussians
         self.spawning = spawning
         self.frame_zero = frame_zero
+        self.videomae = videomae
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.number_of_frames = number_of_frames if not self.random_frames else 2
         self.total_frames = number_of_frames
+        
+        if self.videomae:
+            self.total_frames = 16
+
         self.input_frames = 1 if self.frame_zero else self.total_frames
         
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
         self.scale_factor = scale_factor
         self.scale_vocab = int(scale_vocab)
+        if self.videomae:
+            self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base")
+        else:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
-
-        self.blocks = nn.ModuleList([
-                Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
-                for i in range(depth)])
+            self.blocks = nn.ModuleList([
+                    Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
+                    for i in range(depth)])
 
         self.norm = norm_layer(embed_dim)
         self.num_layers = depth
@@ -135,6 +145,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+        
 
         if random_frames:
             self.frame_pos_embed = nn.Parameter(torch.zeros(1, self.total_frames, decoder_embed_dim))
@@ -186,8 +197,17 @@ class MaskedAutoencoderViT(nn.Module):
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        if not self.videomae:
+            pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
+            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+            # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+            w = self.patch_embed.proj.weight.data
+            torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+            # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
+            torch.nn.init.normal_(self.cls_token, std=.02)
+
 
         decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
         self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
@@ -196,16 +216,12 @@ class MaskedAutoencoderViT(nn.Module):
             frame_pos_embed = get_1d_sincos_pos_embed_from_grid(self.frame_pos_embed.shape[-1], np.array(list(range(self.total_frames))))
             self.frame_pos_embed.data.copy_(torch.from_numpy(frame_pos_embed).float().unsqueeze(0))
 
-        # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
-        w = self.patch_embed.proj.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        
 
         # initialize gaussian deltas to 0
         for delta in self.linear_deltas:
             torch.nn.init.constant_(delta.weight, 0)
 
-        # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-        torch.nn.init.normal_(self.cls_token, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
 
         # initialize nn.Linear and nn.LayerNorm
@@ -278,32 +294,39 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_encoder(self, x, mask_ratio):
         # embed patches
-        if self.frame_zero:
-            # only take in frame 0
-            # normal behavior
-            x_ = self.patch_embed(x[:, :, 0, :, :])
+        if self.videomae:
+            out = self.videomae_model(pixel_values=x.permute(0,2,1,3,4), output_hidden_states=True)
+            x = out["last_hidden_state"]
+            latents = out["hidden_states"]
+            ids_restore = torch.arange(x.shape[1]).unsqueeze(0).repeat(x.shape[0], 1).to(x.device)
+            return x, None, ids_restore, latents
         else:
-            x_ = []
-            for a in range(x.shape[2]):
-                x_.append(self.patch_embed(x[:, :, a, :, :]))
-            x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
-            x_ = rearrange(x_, 'n t c d -> n (t c) d')
+            if self.frame_zero:
+                # only take in frame 0
+                # normal behavior
+                x_ = self.patch_embed(x[:, :, 0, :, :])
+            else:
+                x_ = []
+                for a in range(x.shape[2]):
+                    x_.append(self.patch_embed(x[:, :, a, :, :]))
+                x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
+                x_ = rearrange(x_, 'n t c d -> n (t c) d')
 
-        # add pos embed w/o cls token
-        x = x_ + self.pos_embed
+            # add pos embed w/o cls token
+            x = x_ + self.pos_embed
 
-        # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
-        
+            # masking: length -> length * mask_ratio
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
+            
 
-        # apply Transformer blocks
-        latents = []
-        for blk in self.blocks:
-            x = blk(x)
-            latents.append(x)
-        x = self.norm(x)
+            # apply Transformer blocks
+            latents = []
+            for blk in self.blocks:
+                x = blk(x)
+                latents.append(x)
+            x = self.norm(x)
 
-        return x, mask, ids_restore, latents
+            return x, mask, ids_restore, latents
     def decoder_step(self, x, mask_tokens, frame_token=None):
         if self.random_frames:
             assert frame_token is not None, "Need to provide frame number to use the random_frames functionality"

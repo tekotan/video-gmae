@@ -96,8 +96,8 @@ class FinetuneDataModule(LightningDataModule):
                 video_paths_val = np.load("data/mot_train_label.npy")
             else:
                 video_paths_val = np.load("data/mot_val_label.npy")
-            self.data_train = VideoAnnotationDataset(self.hparams.cfg, video_paths_train, "/home/ubuntu/datasets/motsynth_2024-01-10_1813/MOTSynth_mot_annotations/mot_annotations/", train=True)
-            self.data_val = VideoAnnotationDataset(self.hparams.cfg, video_paths_val, "/home/ubuntu/datasets/motsynth_2024-01-10_1813/MOTSynth_mot_annotations/mot_annotations/", train=False)
+            self.data_train = VideoAnnotationDataset(self.hparams.cfg, video_paths_train, "/datasets/motsynth/current/MOTSynth_mot_annotations/mot_annotations/", train=True)
+            self.data_val = VideoAnnotationDataset(self.hparams.cfg, video_paths_val, "/datasets/motsynth/current/MOTSynth_mot_annotations/mot_annotations/", train=False)
         else:
             raise ValueError("Invalid Dataset Specification")
 

@@ -293,12 +293,12 @@ class FinetuneLitModule(LightningModule):
                                                                 quantize_output_bins=self.cfg.finetune_params.quantize_output_bins,
                                                                 dit_head=self.cfg.finetune_params.dit_head,
                                                                 use_dit_decoder=self.cfg.finetune_params.use_dit_decoder,
-                                                                videomae=self.cfg.finetune_params.videomae,
+                                                                videomae=self.cfg.videomae,
                                                             )
         if self.cfg.inference.testing:
             self.encoder.requires_grad = False
 
-        if self.cfg.finetune_params.videomae:
+        if self.cfg.videomae:
             num_hidden_layers = len(self.encoder.videomae_model.encoder.layer) + 1
         else:
             num_hidden_layers = len(self.encoder.blocks)

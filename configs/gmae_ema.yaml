@@ -258,6 +258,8 @@ configs:
     preload: 0
     chunk_size: 1024
 
+    videomae: False
+
     inference:
         testing: False
         depth: False
@@ -278,5 +280,4 @@ configs:
         dit_head: False
         use_dit_decoder: False
         flow_matching_loss: False
-        videomae: False
         test: False
