@@ -203,28 +203,42 @@ class GMAELitModule(LightningModule):
         for i in range(imgs_.shape[0]):
             # if(torch.sum(pred[i])>0):
             if True:
-                if "loss-masked" in self.cfg.training_type:
-                    # loss on only the masked patches
-                    target = self.encoder.patchify(imgs_[i][None, :, 0])
-                    if "norm-patch" in self.cfg.training_type:
-                        mean = target.mean(dim=-1, keepdim=True)
-                        var = target.var(dim=-1, keepdim=True)
-                        target = (target - mean) / (var + 1.e-6)**.5
-                    pred_target = self.encoder.patchify(pred[None, i, 0].permute(0, 3, 1, 2))
-                    loss_ = (pred_target - target) ** 2
-                    loss_ = loss_.mean(dim=-1)  # [N, L], mean loss per patch
-                    if "all-patch" in self.cfg.training_type:
-                        loss += loss_.mean()
-                    else:
-                        loss += (loss_ * mask[i]).sum() / mask.sum()  # mean loss on removed patches
-                else:
-                    if self.cfg.random_frames and frame_num is not None:
-                        loss += torch.nn.functional.mse_loss(torch.cat([imgs_[i][:, 0:1], imgs_[i][:, frame_num:frame_num+1]], axis=1), 
-                                                        pred[i].permute(3, 0, 1, 2)) # 0, t
-                        # loss += torch.nn.functional.mse_loss(imgs_[i][:, frame_num-1:frame_num+1], pred[i].permute(3, 0, 1, 2)) # t, t+1
+                # if "loss-masked" in self.cfg.training_type:
+                #     # loss on only the masked patches
+                #     target = self.encoder.patchify(imgs_[i][None, :, 0])
+                #     if "norm-patch" in self.cfg.training_type:
+                #         mean = target.mean(dim=-1, keepdim=True)
+                #         var = target.var(dim=-1, keepdim=True)
+                #         target = (target - mean) / (var + 1.e-6)**.5
+                #     pred_target = self.encoder.patchify(pred[None, i, 0].permute(0, 3, 1, 2))
+                #     loss_ = (pred_target - target) ** 2
+                #     loss_ = loss_.mean(dim=-1)  # [N, L], mean loss per patch
+                #     if "all-patch" in self.cfg.training_type:
+                #         loss += loss_.mean()
+                #     else:
+                #         loss += (loss_ * mask[i]).sum() / mask.sum()  # mean loss on removed patches
+                # else:
+                if self.cfg.random_frames and frame_num is not None:
+                    if "loss-masked" in self.cfg.training_type:
+                        gt_ = torch.cat([imgs_[i][:, 0:1], imgs_[i][:, frame_num:frame_num+1]], axis=1)
+                        gt_target = self.encoder.patchify(gt_.permute(1, 0, 2, 3)).view(-1, 768)
 
+                        pred_ = pred[i].permute(3, 0, 1, 2)
+                        pred_target = self.encoder.patchify(pred_.permute(1, 0, 2, 3)).view(-1, 768)
+
+                        mask_ = mask[i].view(self.num_frames, -1)
+                        mask_ = torch.cat([mask_[0:1], mask_[frame_num:frame_num+1]], axis=0)
+                        mask_ = mask_.view(-1)
+
+                        loss_ = (gt_target - pred_target)**2
+                        loss_ = (loss_ * mask_.unsqueeze(-1)).sum() / mask_.sum()
+                        loss += loss_
                     else:
-                        loss += torch.nn.functional.mse_loss(imgs_[i][:, :self.num_frames], pred[i].permute(3, 0, 1, 2))
+                        loss += torch.nn.functional.mse_loss(imgs_[i][:, frame_num-1:frame_num+1], pred[i].permute(3, 0, 1, 2)) # t, t+1
+                    # loss += torch.nn.functional.mse_loss(imgs_[i][:, frame_num-1:frame_num+1], pred[i].permute(3, 0, 1, 2)) # t, t+1
+
+                else:
+                    loss += torch.nn.functional.mse_loss(imgs_[i][:, :self.num_frames], pred[i].permute(3, 0, 1, 2))
                 count += 1
         if self.cfg.deltas_reg_weight > 0:
             means, scales, quats = deltas
@@ -285,21 +299,22 @@ class GMAELitModule(LightningModule):
 
             if "gaussian" in self.cfg.training_type:
                 latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(image, mask_ratio=self.cfg.mask_ratio)
-                x_points_main = self.encoder.forward_decoder(latent, ids_restore)
-                pred_main = self.encoder.forward_render(x_points_main)  # [N, L, p*p*3]
+                # x_points_main = self.encoder.forward_decoder(latent, ids_restore)
+                pred_main = self.encoder.forward_decoder(latent, ids_restore)
+                # pred_main = self.encoder.forward_render(x_points_main)  # [N, L, p*p*3]
                 loss = self.forward_loss(image[:, :, None, :, :], pred_main, mask, additional_data=None)
 
                 loss_dict  = {"loss": loss}
-                if "mythostra" in self.cfg.training_type:
-                    for j in [32,64,128,256,512]:
-                        x_points_ = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian=j)
-                        pred_ = self.encoder.forward_render(x_points_, limit_gaussian=j) # [N, L, p*p*3]
+                # if "mythostra" in self.cfg.training_type:
+                #     for j in [32,64,128,256,512]:
+                #         x_points_ = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian=j)
+                #         pred_ = self.encoder.forward_render(x_points_, limit_gaussian=j) # [N, L, p*p*3]
 
-                        loss_ = self.forward_loss(image[:, :, None, :, :], pred_, mask, additional_data=None)
-                        loss_dict[f"loss_{j}"] = loss_ / (self.cfg.vocab_size - j)
+                #         loss_ = self.forward_loss(image[:, :, None, :, :], pred_, mask, additional_data=None)
+                #         loss_dict[f"loss_{j}"] = loss_ / (self.cfg.vocab_size - j)
 
                 # save the masked images and reconstructed images
-                if "save-images" in self.cfg.training_type and batch_idx<1000000:
+                if "save-images" in self.cfg.training_type and batch_idx<1:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(image, mask_ratio=0.0)
                     # renormalize to 0,1
@@ -310,17 +325,17 @@ class GMAELitModule(LightningModule):
 
                     preds_all = []
                     if "save-images-z" in self.cfg.training_type:
-                        x_points_ = self.encoder.forward_decoder(latent, ids_restore)
+                        # x_points_ = self.encoder.forward_decoder(latent, ids_restore)
                         for j in [32,64,128,256,512,-1]:
-                            pred_ = self.encoder.forward_render(x_points_, limit_gaussian_z=j)
+                            pred_ = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian_z=j)
                             preds_all.append(pred_)
                         preds_2 = torch.stack(preds_all, dim=0)
                         preds = preds_2[:, :, 0].permute(1, 2, 0, 3, 4).reshape(preds_2.shape[1], preds_2.shape[3], preds_2.shape[0]*preds_2.shape[4], 3)
                         preds = (preds.detach().cpu().numpy() * 255).astype(np.uint8)
                     elif "save-images-m" in self.cfg.training_type:
                         for j in [32,64,128,256,512,-1]:
-                            x_points_m = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian=j)
-                            pred_ = self.encoder.forward_render(x_points_m, limit_gaussian=j)
+                            # x_points_m = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian=j)
+                            pred_ = self.encoder.forward_decoder(latent, ids_restore, limit_gaussian=j)
                             preds_all.append(pred_)
                         preds_2 = torch.stack(preds_all, dim=0)
                         preds = preds_2[:, :, 0].permute(1, 2, 0, 3, 4).reshape(preds_2.shape[1], preds_2.shape[3], preds_2.shape[0]*preds_2.shape[4], 3)
@@ -330,8 +345,8 @@ class GMAELitModule(LightningModule):
 
 
                     # get points on xy density map
-                    x_points = self.encoder.forward_decoder(latent, ids_restore)
-                    _, xys = self.encoder.forward_render(x_points, return_gaussians=True, limit_gaussian_z=-1)
+                    # x_points = self.encoder.forward_decoder(latent, ids_restore)
+                    _, xys = self.encoder.forward_decoder(latent, ids_restore, return_gaussians=True, limit_gaussian_z=-1)
                     plane_ = torch.zeros(len(xys), self.cfg.input_size, self.cfg.input_size, 3).to(device=device).to(dtype=dtype)
                     # try:
                     #     for i in range(len(xys)):
@@ -343,7 +358,7 @@ class GMAELitModule(LightningModule):
                     plane_ = (plane_.detach().cpu().numpy() * 255).astype(np.uint8)
 
                     # get depth maps
-                    pred_depth = self.encoder.forward_render(x_points, return_depth=True)
+                    pred_depth = self.encoder.forward_decoder(latent, ids_restore, return_depth=True)
                     pred_depth = pred_depth[:, 0]
                     pred_depth = (pred_depth.detach().cpu().numpy() * 255).astype(np.uint8)
 
@@ -510,6 +525,7 @@ class GMAELitModule(LightningModule):
 
             return loss_dict, extras_, logits_
 
+        # for vjepa style augmentation
         elif self.cfg.video_source=="video-vjepa":
 
             if "rand-mask" in self.cfg.training_type:
@@ -521,8 +537,8 @@ class GMAELitModule(LightningModule):
             else:
                 mask_ = self.cfg.mask_ratio
 
-            if not self.training:
-                mask_ = 0.0
+            # if not self.training:
+            #     mask_ = 0.0
 
             number_of_vides_perclip = len(batch[0])
             labels = batch[1]   
@@ -532,24 +548,31 @@ class GMAELitModule(LightningModule):
             B = batch[0][0][0].shape[0]
 
 
-            for clip in range(number_of_vides_perclip):
-                video = batch[0][clip][0] # bs, 3, t, h, w
-                latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=mask_)
-                if self.cfg.random_frames:
-                    x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
-                    pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
-                    loss = self.forward_loss(video, pred, mask, frame_num=random_frame, deltas=deltas, additional_data=None)
-                else:
-                    x_points = self.encoder.forward_decoder(latent, ids_restore)
-                    pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
-                    loss = self.forward_loss(video, pred, mask, deltas=deltas, additional_data=None)
+            if "finetune" not in self.cfg.training_type:
+                for clip in range(number_of_vides_perclip):
+                    video = batch[0][clip][0] # bs, 3, t, h, w
+                    latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=mask_)
+                    if self.cfg.random_frames:
+                        x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
+                        pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
+                        loss = self.forward_loss(video, pred, mask, frame_num=random_frame, deltas=deltas, additional_data=None)
+                    else:
+                        x_points = self.encoder.forward_decoder(latent, ids_restore)
+                        pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
+                        loss = self.forward_loss(video, pred, mask, deltas=deltas, additional_data=None)
 
-                logits_ = torch.stack(latent_layers, dim=0)
-                clip_logits.append(logits_)
+                    logits_ = torch.stack(latent_layers, dim=0)
+                    clip_logits.append(logits_)
+            else:
+                clip_logits = []
+                for clip in range(number_of_vides_perclip):
+                    video = batch[0][clip][0] # bs, 3, t, h, w
+                    latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=mask_)
+                    clip_logits.append(latent_layers)
 
             clip_logits_ = torch.stack(clip_logits, dim=2)#.view(logits_.shape[0], -1, logits_.shape[2])
             logits_cls = []
-            loss_dict = {}
+            loss_dict  = {"loss": loss}
             for i, layer_ in enumerate(self.linear_layer):
                 if "attn" in self.cfg.training_type:
                     out_ = clip_logits_[i].view(B, -1, clip_logits_.shape[-1])
@@ -560,13 +583,10 @@ class GMAELitModule(LightningModule):
                     loss_cls = F.cross_entropy(logits[labels!=-1], labels[labels!=-1].to(device=device))
                     loss_dict["loss_cls_" + str(i)] = loss_cls
                     logits_cls.append(logits)
-                    if i == len(self.linear_layer)-1:
-                        loss_dict["loss"] = loss_cls
                 else:
                     loss_dict["loss_cls_" + str(i)] = torch.tensor(0).to(device=device).to(dtype=dtype)
                     logits_cls.append([])
-                    if i == len(self.linear_layer)-1:
-                        loss_dict["loss"] = torch.tensor(0).to(device=device).to(dtype=dtype)
+
             extras_    = {}
             logits_    = {}
             logits_["logits_cls"] = logits_cls

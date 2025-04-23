@@ -68,11 +68,11 @@ class VideoDataModule(LightningDataModule):
 
         # for evals
         if "k400-vjepa" in self.hparams.cfg.training_type:
-            from chewbacca.datamodules.components.video_datasets_vjepa import VideoDataset
-            self.data_train = VideoDataset(self.hparams.cfg, train=True, datasets_weights=None, frames_per_clip=self.hparams.cfg.seq_length, 
+            from chewbacca.datamodules.components.video_datasets_vjepa import VideoDataset as VideoDatasetVJepa
+            self.data_train = VideoDatasetVJepa(self.hparams.cfg, train=True, datasets_weights=None, frames_per_clip=self.hparams.cfg.seq_length, 
                                             frame_step=4, num_clips=1, transform=None, shared_transform=None, random_clip_sampling=True, 
                                             allow_clip_overlap=True, filter_short_videos=False, filter_long_videos=int(10**9), duration=None)
-            self.data_val = VideoDataset(self.hparams.cfg, train=False, datasets_weights=None, frames_per_clip=self.hparams.cfg.seq_length, frame_step=4, num_clips=1, 
+            self.data_val = VideoDatasetVJepa(self.hparams.cfg, train=False, datasets_weights=None, frames_per_clip=self.hparams.cfg.seq_length, frame_step=4, num_clips=1, 
                                             transform=None, shared_transform=None, random_clip_sampling=True, allow_clip_overlap=True, filter_short_videos=False, 
                                             filter_long_videos=int(10**9), duration=None)
 
