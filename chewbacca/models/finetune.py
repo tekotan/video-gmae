@@ -19,7 +19,7 @@ from omegaconf import DictConfig
 from timm.data.mixup import Mixup
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from torch import nn
-from torchmetrics import MeanMetric, MeanSquaredError
+from torchmetrics import MeanMetric, MeanSquaredError, SumMetric
 from torchmetrics.aggregation import CatMetric
 from torchmetrics.classification.accuracy import Accuracy
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -73,58 +73,180 @@ def calculate_iou(boxes1, boxes2):
     iou = intersection / (union + 1e-6)
     return iou
 
-class AverageJaccard(torch.nn.Module):
-    def __init__(self, thresholds=[1/256, 2/256, 4/256, 8/256, 16/256]):
-        super().__init__()
-        self.thresholds = thresholds
-        self.reset()
+def compute_tapvid_metrics(
+    query_points,
+    gt_occluded,
+    gt_tracks,
+    pred_occluded,
+    pred_tracks,
+    query_mode="first",
+):
+    """Computes TAP-Vid metrics (Jaccard, Pts. Within Thresh, Occ. Acc.)
 
-    def reset(self):
-        self.total_jaccard = 0
-        self.count = 0
+    See the TAP-Vid paper for details on the metric computation.  All inputs are
+    given in raster coordinates.  The first three arguments should be the direct
+    outputs of the reader: the 'query_points', 'occluded', and 'target_points'.
+    The paper metrics assume these are scaled relative to 256x256 images.
+    pred_occluded and pred_tracks are your algorithm's predictions.
 
-    def compute(self):
-        return self.total_jaccard / (self.count if self.count > 0 else 1)
+    This function takes a batch of inputs, and computes metrics separately for
+    each video.  The metrics for the full benchmark are a simple mean of the
+    metrics across the full set of videos.  These numbers are between 0 and 1,
+    but the paper multiplies them by 100 to ease reading.
 
-    def update(self, pred_points, pred_visible, true_points, true_visible):
-        batch_size = pred_points.shape[0]
+    Args:
+       query_points: The query points, an in the format [t, y, x].  Its size is
+         [b, n, 3], where b is the batch size and n is the number of queries
+       gt_occluded: A boolean array of shape [b, n, t], where t is the number
+         of frames.  True indicates that the point is occluded.
+       gt_tracks: The target points, of shape [b, n, t, 2].  Each point is
+         in the format [x, y]
+       pred_occluded: A boolean array of predicted occlusions, in the same
+         format as gt_occluded.
+       pred_tracks: An array of track predictions from your algorithm, in the
+         same format as gt_tracks.
+       query_mode: Either 'first' or 'strided', depending on how queries are
+         sampled.  If 'first', we assume the prior knowledge that all points
+         before the query point are occluded, and these are removed from the
+         evaluation.
 
-        for batch_idx in range(batch_size):
-            jaccard_sum = 0
+    Returns:
+        A dict with the following keys:
 
-            for threshold in self.thresholds:
-                # Calculate distances between predicted and ground truth points
-                distances = torch.norm(
-                    pred_points[batch_idx].unsqueeze(1) - true_points[batch_idx].unsqueeze(0),
-                    dim=-1
-                )
+        occlusion_accuracy: Accuracy at predicting occlusion.
+        pts_within_{x} for x in [1, 2, 4, 8, 16]: Fraction of points
+          predicted to be within the given pixel threshold, ignoring occlusion
+          prediction.
+        jaccard_{x} for x in [1, 2, 4, 8, 16]: Jaccard metric for the given
+          threshold
+        average_pts_within_thresh: average across pts_within_{x}
+        average_jaccard: average across jaccard_{x}
+    """
+    assert gt_occluded.shape == pred_occluded.shape
 
-                # Points within threshold distance
-                within_threshold = distances <= threshold
+    metrics = {}
 
-                # True positives: predicted visible points that are within threshold of visible ground truth points
-                true_positives = torch.sum(
-                    (pred_visible[batch_idx].unsqueeze(1) & true_visible[batch_idx].unsqueeze(0) & within_threshold).float()
-                )
+    # Don't evaluate the query point.  Numpy doesn't have one_hot, so we
+    # replicate it by indexing into an identity matrix.
+    one_hot_eye = np.eye(gt_tracks.shape[2])
+    query_frame = query_points[..., 0]
+    query_frame = np.round(query_frame).astype(np.int32)
+    evaluation_points = one_hot_eye[query_frame] == 0
 
-                # False positives: predicted visible points that are either farther than threshold or ground truth is occluded
-                false_positives = torch.sum(
-                    pred_visible[batch_idx] & ~torch.any(within_threshold & true_visible[batch_idx].unsqueeze(0), dim=1)
-                )
+    # If we're using the first point on the track as a query, don't evaluate the
+    # other points.
 
-                # False negatives: ground truth visible points that are predicted occluded or farther than threshold
-                false_negatives = torch.sum(
-                    true_visible[batch_idx] & ~torch.any(within_threshold & pred_visible[batch_idx].unsqueeze(1), dim=0)
-                )
+    if query_mode == "first":
+        assert gt_occluded.shape[0] == 1, "Expected batch size 1 gt_occluded"
+        for i in range(gt_occluded.shape[1]):
+            index = np.where(gt_occluded[0, i] == 0)[0]
+            index = index[0] if len(index) > 0 else gt_occluded.shape[2]
+            evaluation_points[0, i, :index] = False
+    elif query_mode != "strided":
+        raise ValueError("Unknown query mode " + query_mode)
 
-                # Calculate Jaccard
-                denominator = true_positives + false_positives + false_negatives
-                jaccard = true_positives / (denominator + 1e-6)
-                jaccard_sum += jaccard
+    # breakpoint()
+    # Occlusion accuracy is simply how often the predicted occlusion equals the
+    # ground truth.
+    occ_acc = np.sum(
+        np.equal(pred_occluded, gt_occluded) & evaluation_points,
+        axis=(1, 2),
+    ) / np.sum(evaluation_points)
+    metrics["occlusion_accuracy"] = occ_acc
 
-            # Average over thresholds
-            self.total_jaccard += jaccard_sum / len(self.thresholds)
-            self.count += 1
+    # Added by DW based on code by SK
+    metrics["occ_tp"] = np.sum(np.equal(pred_occluded, gt_occluded) & gt_occluded & evaluation_points, axis=(1, 2))
+    metrics["occ_fp"] = np.sum(
+        np.logical_not(np.equal(pred_occluded, gt_occluded)) & pred_occluded & evaluation_points, axis=(1, 2)
+    )
+    metrics["occ_fn"] = np.sum(
+        np.logical_not(np.equal(pred_occluded, gt_occluded)) & np.logical_not(pred_occluded) & evaluation_points,
+        axis=(1, 2),
+    )
+
+    # Next, convert the predictions and ground truth positions into pixel
+    # coordinates.
+    visible = np.logical_not(gt_occluded)
+    pred_visible = np.logical_not(pred_occluded)
+    all_frac_within = []
+    all_jaccard = []
+    # breakpoint()
+    L2_error = np.sqrt(
+        np.sum(
+            np.square(pred_tracks - gt_tracks),
+            axis=-1,
+        )
+    )
+    masked_L2_error = L2_error * (1 - gt_occluded)
+    avg_distance = np.sum(masked_L2_error) / np.sum(1 - gt_occluded)
+    metrics["avg_distance"] = np.array([avg_distance])
+    nonzero_masked_error = L2_error[(1 - gt_occluded).astype(bool)]
+    assert np.allclose(masked_L2_error.sum(), nonzero_masked_error.sum()), (
+        masked_L2_error.sum(),
+        nonzero_masked_error.sum(),
+        set((1 - gt_occluded).flatten().tolist()),
+    )
+    assert nonzero_masked_error.size == np.sum(1 - gt_occluded)
+    assert np.allclose(avg_distance, nonzero_masked_error.mean()), (
+        avg_distance,
+        nonzero_masked_error.mean(),
+        avg_distance - nonzero_masked_error.mean(),
+        set((1 - gt_occluded).flatten().tolist()),
+    )
+    metrics["median_distance"] = np.array([np.median(nonzero_masked_error)])
+
+    for thresh in [1, 2, 4, 8, 16]:
+        # True positives are points that are within the threshold and where both
+        # the prediction and the ground truth are listed as visible.
+        within_dist = np.sum(
+            np.square(pred_tracks - gt_tracks),
+            axis=-1,
+        ) < np.square(thresh)
+        is_correct = np.logical_and(within_dist, visible)
+
+        # Compute the frac_within_threshold, which is the fraction of points
+        # within the threshold among points that are visible in the ground truth,
+        # ignoring whether they're predicted to be visible.
+        count_correct = np.sum(
+            is_correct & evaluation_points,
+            axis=(1, 2),
+        )
+        count_visible_points = np.sum(visible & evaluation_points, axis=(1, 2))
+        frac_correct = count_correct / count_visible_points
+        metrics["pts_within_" + str(thresh)] = frac_correct
+
+        metrics["num_visible"] = count_visible_points
+        metrics["num_pts_within_" + str(thresh)] = count_correct
+
+        all_frac_within.append(frac_correct)
+
+        true_positives = np.sum(is_correct & pred_visible & evaluation_points, axis=(1, 2))
+
+        # The denominator of the jaccard metric is the true positives plus
+        # false positives plus false negatives.  However, note that true positives
+        # plus false negatives is simply the number of points in the ground truth
+        # which is easier to compute than trying to compute all three quantities.
+        # Thus we just add the number of points in the ground truth to the number
+        # of false positives.
+        #
+        # False positives are simply points that are predicted to be visible,
+        # but the ground truth is not visible or too far from the prediction.
+        gt_positives = np.sum(visible & evaluation_points, axis=(1, 2))
+        false_positives = (~visible) & pred_visible
+        false_positives = false_positives | ((~within_dist) & pred_visible)
+        false_positives = np.sum(false_positives & evaluation_points, axis=(1, 2))
+        jaccard = true_positives / (gt_positives + false_positives)
+        metrics["jaccard_" + str(thresh)] = jaccard
+        all_jaccard.append(jaccard)
+    metrics["average_jaccard"] = np.mean(
+        np.stack(all_jaccard, axis=1),
+        axis=1,
+    )
+    metrics["average_pts_within_thresh"] = np.mean(
+        np.stack(all_frac_within, axis=1),
+        axis=1,
+    )
+    return metrics
 
 
 
@@ -171,12 +293,15 @@ class FinetuneLitModule(LightningModule):
                                                                 quantize_output_bins=self.cfg.finetune_params.quantize_output_bins,
                                                                 dit_head=self.cfg.finetune_params.dit_head,
                                                                 use_dit_decoder=self.cfg.finetune_params.use_dit_decoder,
+                                                                videomae=self.cfg.videomae,
                                                             )
         if self.cfg.inference.testing:
             self.encoder.requires_grad = False
 
-
-        num_hidden_layers = len(self.encoder.blocks)
+        if self.cfg.videomae:
+            num_hidden_layers = len(self.encoder.videomae_model.encoder.layer) + 1
+        else:
+            num_hidden_layers = len(self.encoder.blocks)
         hsize = self.encoder.patch_embed.proj.weight.shape[0]
 
         self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
@@ -204,7 +329,13 @@ class FinetuneLitModule(LightningModule):
             self.box_mse = MeanSquaredError()
             self.box_iou = MeanMetric()  # For tracking mean IoU
         elif self.mode == "point-tracking":
-            self.average_jaccard = AverageJaccard()
+            self.average_jaccard = MeanMetric()
+            self.avg_distance = MeanMetric()
+            self.average_pts_within_thresh = MeanMetric()
+            self.occlusion_accuracy = MeanMetric()
+            self.occ_tp = SumMetric()
+            self.occ_fp = SumMetric()
+            self.occ_fn = SumMetric()
 
         # create folders for storing results
         os.makedirs(self.cfg.storage_folder + "/results/", exist_ok=True)
@@ -522,13 +653,14 @@ class FinetuneLitModule(LightningModule):
 
 
                 elif self.mode == "point-tracking":
-                    if self.cfg.finetune_params.quantized_prediction:
-                        x_points_train = torch.cat([torch.round(finetune_target[:, :, 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins, 
-                            torch.argmax(x_points, dim=-1) / self.cfg.finetune_params.quantize_output_bins], dim=2)
-                        occlusions_pred_train = torch.cat([occluded_points[:, :, 0:1], occlusions_pred.clone()], dim=2)
-                    else:
-                        x_points_train = torch.cat([finetune_target[:, :, 0:1], x_points.clone()], dim=2)
-                        occlusions_pred_train = torch.cat([occluded_points[:, :, 0:1], occlusions_pred.clone()], dim=2)
+                    if self.cfg.finetune_params.autoregressive:
+                        if self.cfg.finetune_params.quantized_prediction:
+                            x_points_train = torch.cat([torch.round(finetune_target[:, :, 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins, 
+                                torch.argmax(x_points, dim=-1) / self.cfg.finetune_params.quantize_output_bins], dim=2)
+                            occlusions_pred_train = torch.cat([occluded_points[:, :, 0:1], occlusions_pred.clone()], dim=2)
+                        else:
+                            x_points_train = torch.cat([finetune_target[:, :, 0:1], x_points.clone()], dim=2)
+                            occlusions_pred_train = torch.cat([occluded_points[:, :, 0:1], occlusions_pred.clone()], dim=2)
 
                     if self.cfg.finetune_params.batch_prediction:
                         if self.cfg.finetune_params.zero_t_prediction:
@@ -573,18 +705,21 @@ class FinetuneLitModule(LightningModule):
                         torch.save(data, f"{self.cfg.storage_folder}/tests/eval_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
 
                     final_image_ = self.visualize_point_tracking(video, x_points, init_queries, finetune_target, occluded_points, occlusions_pred)
-                    final_image_train_ = self.visualize_point_tracking(video, x_points_train, init_queries, finetune_target, occluded_points, occlusions_pred_train)
-
                     final_image_ = np.concatenate(final_image_, axis=1)
-                    final_image_train_ = np.concatenate(final_image_train_, axis=1)
-                    final_image_ = np.concatenate([final_image_train_, final_image_], axis=2)
+
+                    if self.cfg.finetune_params.autoregressive:
+                        final_image_train_ = self.visualize_point_tracking(video, x_points_train, init_queries, finetune_target, occluded_points, occlusions_pred_train)
+                        final_image_train_ = np.concatenate(final_image_train_, axis=1)
+                        final_image_ = np.concatenate([final_image_train_, final_image_], axis=2)
+                    
                     final_image_ = [frame for frame in final_image_]
                 elif self.mode == "object-tracking":
-                    if self.cfg.finetune_params.quantized_prediction:
-                        box_pred_train = torch.cat([torch.round(finetune_target[:, :, 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins, 
-                                torch.argmax(box_pred, dim=-1) / self.cfg.finetune_params.quantize_output_bins], dim=2)
-                    else:
-                        box_pred_train = torch.cat([finetune_target[:, :, 0:1], box_pred.clone()], dim=2)
+                    if self.cfg.finetune_params.autoregressive:
+                        if self.cfg.finetune_params.quantized_prediction:
+                            box_pred_train = torch.cat([torch.round(finetune_target[:, :, 0:1] * self.cfg.finetune_params.quantize_output_bins) / self.cfg.finetune_params.quantize_output_bins, 
+                                    torch.argmax(box_pred, dim=-1) / self.cfg.finetune_params.quantize_output_bins], dim=2)
+                        else:
+                            box_pred_train = torch.cat([finetune_target[:, :, 0:1], box_pred.clone()], dim=2)
                     if self.cfg.finetune_params.batch_prediction:
                         if self.cfg.finetune_params.zero_t_prediction:
                             box_pred = self.encoder.forward_decoder_zero_t(latent, ids_restore, init_queries)
@@ -619,10 +754,13 @@ class FinetuneLitModule(LightningModule):
                         data = (init_queries, box_pred, finetune_target)
                         torch.save(data, f"{self.cfg.storage_folder}/tests/eval_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
 
-                    final_image_train_ = self.visualize_object_tracking(video, box_pred_train, finetune_target, batch_idx)
                     final_image_ = np.concatenate(final_image_, axis=2)
-                    final_image_train_ = np.concatenate(final_image_train_, axis=2)
-                    final_image_ = np.concatenate([final_image_train_, final_image_], axis=1)
+
+                    if self.cfg.finetune_params.autoregressive:
+                        final_image_train_ = self.visualize_object_tracking(video, box_pred_train, finetune_target, batch_idx)
+                        final_image_train_ = np.concatenate(final_image_train_, axis=2)
+                        final_image_ = np.concatenate([final_image_train_, final_image_], axis=1)
+                    
                     final_image_ = [frame for frame in final_image_]
 
             # save final image with epoch and batch index
@@ -782,6 +920,7 @@ class FinetuneLitModule(LightningModule):
             occluded = batch[3]
             filtered_x_points = extra["x_points"]
             filtered_x_points[query_points[:, :, 0] == -1] = 0
+            query_points[query_points[:, :, 0] == -1] = 0
             if extra["x_points"].shape[2] == 2:
                 frame_num = extra["frame_num"]
                 target_points = torch.cat([target_points[:, :, 0:1], target_points[:, :, frame_num:frame_num+1]], dim=2)
@@ -801,11 +940,40 @@ class FinetuneLitModule(LightningModule):
             pred_visible = ~(extra.get("occluded_pred", torch.zeros_like(query_points[:,:,0])) > 0.5).squeeze(-1)
             true_points = target_points
             true_visible = ~(occluded>0.5)  # Assuming batch[3] contains occlusion information
-            self.average_jaccard.update(pred_points[:, :, self.cfg.inference.context_length:], 
-                                        pred_visible[:, :, self.cfg.inference.context_length:], 
-                                        true_points[:, :, self.cfg.inference.context_length:], 
-                                        true_visible[:, :, self.cfg.inference.context_length:]
-            )
+                        
+            for i in range(query_points.shape[0]):
+                first_invalid_index = torch.where(query_points[i, :, 0] == -1)[0]
+
+                if len(first_invalid_index) == 0:
+                    first_invalid_index = true_points.shape[1]
+                else:
+                    first_invalid_index = first_invalid_index[0]
+
+                query_points_ = query_points[i:i+1, :first_invalid_index]
+                query_points_[:, :, 1:] *= self.cfg.input_size
+
+                pred_points_ = pred_points[i:i+1, :first_invalid_index] * self.cfg.input_size
+                pred_visible_ = pred_visible[i:i+1, :first_invalid_index]
+
+                true_points_ = true_points[i:i+1, :first_invalid_index] * self.cfg.input_size
+                true_visible_ = true_visible[i:i+1, :first_invalid_index]
+
+                if set((1 - (~true_visible_).detach().cpu().numpy()).flatten().tolist()) == {0}:
+                    log.info(f"Skipping batch {batch_idx} for point tracking, all points are occluded")
+                    continue
+
+                metrics = compute_tapvid_metrics(query_points_.detach().cpu().numpy(), (~true_visible_).detach().cpu().numpy(), true_points_.detach().cpu().numpy(), 
+                                                (~pred_visible_).detach().cpu().numpy(), pred_points_.detach().cpu().numpy())
+                
+                self.average_jaccard.update(metrics["average_jaccard"].mean())
+                self.avg_distance.update(metrics["avg_distance"].mean())
+                self.average_pts_within_thresh.update(metrics["average_pts_within_thresh"].mean())
+                self.occlusion_accuracy.update(metrics["occlusion_accuracy"].mean())
+
+                self.occ_fp.update(metrics["occ_fp"].sum())
+                self.occ_tp.update(metrics["occ_tp"].sum())
+                self.occ_fn.update(metrics["occ_fn"].sum())
+
         if self.mode == "object-tracking":
             loss_dict, extra, logits_cls = self.step(batch, batch_idx, return_images=True)
 
@@ -836,8 +1004,25 @@ class FinetuneLitModule(LightningModule):
 
         # Log Jaccard metric
         if self.mode == "point-tracking":
+            occ_tp = self.occ_tp.compute()
+            occ_fp = self.occ_fp.compute()
+            occ_fn = self.occ_fn.compute()
+            precision = occ_tp / (occ_tp + occ_fp)
+            recall = occ_tp / (occ_tp + occ_fn)
+            occ_f1 = 2 * ((precision * recall) / (precision + recall))
+            self.log("val/occ_f1", occ_f1, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+
             jaccard_score = self.average_jaccard.compute()
             self.log("val/jaccard", jaccard_score, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
+            avg_distance = self.avg_distance.compute()
+            self.log("val/avg_distance", avg_distance, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+
+            avg_pts_within_thresh = self.average_pts_within_thresh.compute()
+            self.log("val/avg_pts_within_thresh", avg_pts_within_thresh, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+
+            occlusion_accuracy = self.occlusion_accuracy.compute()
+            self.log("val/occlusion_accuracy", occlusion_accuracy, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         elif self.mode == "object-tracking":
             iou_score = self.box_iou.compute()
             self.log("val/iou", iou_score, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -884,7 +1069,7 @@ class FinetuneLitModule(LightningModule):
             self.box_iou.reset()
 
         # for linear probe accuracy on imagenet and k400, compute and log the accuracy
-        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type):
+        if(self.cfg.task == "finetune" or "imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type):
             for i, layer_ in enumerate(self.linear_layer):
                 self.log("val/linear_probe_acc_" + str(i), self.val_acc[i].compute().item(), prog_bar=True, sync_dist=True)
                 log.info("Accuracy : " + str(self.val_acc[i].compute().item()))
@@ -893,6 +1078,18 @@ class FinetuneLitModule(LightningModule):
                 self.train_acc[i].reset()
             if self.mode == "point-tracking":
                 log.info("Jaccard Score : " + str(self.average_jaccard.compute().item()))
+                log.info("Avg Distance : " + str(self.avg_distance.compute().item()))
+                log.info("Avg Points within Thresh : " + str(self.average_pts_within_thresh.compute().item()))
+                log.info("Occlusion Accuracy : " + str(self.occlusion_accuracy.compute().item()))
+
+                occ_tp = self.occ_tp.compute()
+                occ_fp = self.occ_fp.compute()
+                occ_fn = self.occ_fn.compute()
+                precision = occ_tp / (occ_tp + occ_fp)
+                recall = occ_tp / (occ_tp + occ_fn)
+                occ_f1 = 2 * ((precision * recall) / (precision + recall))
+                log.info("Occlusion F1 Score : " + str(occ_f1.item()))
+
             elif self.mode == "object-tracking":
                 log.info("IoU : " + str(self.box_iou.compute().item()))
                 log.info("Box MSE : " + str(self.box_mse.compute().item()))
@@ -900,6 +1097,13 @@ class FinetuneLitModule(LightningModule):
         # reset the metric
         if self.mode == "point-tracking":
             self.average_jaccard.reset()
+            self.avg_distance.reset()
+            self.average_pts_within_thresh.reset()
+            self.occlusion_accuracy.reset()
+            self.occ_fp.reset()
+            self.occ_tp.reset()
+            self.occ_fn.reset()
+            
         elif self.mode == "object-tracking":
             self.box_iou.reset()
             self.box_mse.reset()

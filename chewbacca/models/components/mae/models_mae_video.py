@@ -40,6 +40,50 @@ import cv2
 from gsplat import rasterization
 import matplotlib.pyplot as plt
 
+from transformers import VideoMAEModel
+
+
+class CausalAttention(Attention):
+    def forward(self, x):
+
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.attn_drop.p if self.training else 0.,
+                is_causal=True
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            causal_mask = torch.tril(torch.ones(N, N, device=x.device)).unsqueeze(0).unsqueeze(0)
+            attn = attn.masked_fill(causal_mask == 0, float('-inf'))
+
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+class CausalBlock(Block):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Replace the attention module with the causal version
+        self.attn = CausalAttention(
+            dim=self.attn.qkv.in_features,
+            num_heads=self.attn.num_heads,
+            qkv_bias=self.attn.qkv.bias is not None,
+            attn_drop=self.attn.attn_drop.p,
+            proj_drop=self.attn.proj_drop.p
+        )
+
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
@@ -49,37 +93,46 @@ class MaskedAutoencoderViT(nn.Module):
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, num_gaussian=1000, 
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
                  deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
-                 rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False):
+                 rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False,
+                 pairwise_random_frames=False, videomae=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
         self.deltas_reg_weight = deltas_reg_weight
         self.random_frames = random_frames
+        self.pairwise_random_frames = pairwise_random_frames
         self.mean_deltas = mean_deltas
         self.rgb_deltas = rgb_deltas
         self.rgb_deltas_scale = rgb_deltas_scale
         self.upsample_gaussians = upsample_gaussians
         self.spawning = spawning
         self.frame_zero = frame_zero
+        self.videomae = videomae
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.number_of_frames = number_of_frames if not self.random_frames else 2
         self.total_frames = number_of_frames
+        
+        if self.videomae:
+            self.total_frames = 16
+
         self.input_frames = 1 if self.frame_zero else self.total_frames
         
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
         self.scale_factor = scale_factor
         self.scale_vocab = int(scale_vocab)
+        if self.videomae:
+            self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base")
+        else:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
-
-        self.blocks = nn.ModuleList([
-                Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
-                for i in range(depth)])
+            self.blocks = nn.ModuleList([
+                    Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
+                    for i in range(depth)])
 
         self.norm = norm_layer(embed_dim)
         self.num_layers = depth
@@ -92,14 +145,19 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
 
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+        
 
         if random_frames:
             self.frame_pos_embed = nn.Parameter(torch.zeros(1, self.total_frames, decoder_embed_dim))
 
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        if not random_frames:
+            DecoderBlock = CausalBlock
+        else:
+            DecoderBlock = Block
 
         self.decoder_blocks = nn.ModuleList([
-            Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
+            DecoderBlock(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(decoder_depth)])
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
@@ -139,8 +197,17 @@ class MaskedAutoencoderViT(nn.Module):
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        if not self.videomae:
+            pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
+            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+            # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+            w = self.patch_embed.proj.weight.data
+            torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+            # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
+            torch.nn.init.normal_(self.cls_token, std=.02)
+
 
         decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
         self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
@@ -149,16 +216,12 @@ class MaskedAutoencoderViT(nn.Module):
             frame_pos_embed = get_1d_sincos_pos_embed_from_grid(self.frame_pos_embed.shape[-1], np.array(list(range(self.total_frames))))
             self.frame_pos_embed.data.copy_(torch.from_numpy(frame_pos_embed).float().unsqueeze(0))
 
-        # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
-        w = self.patch_embed.proj.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        
 
         # initialize gaussian deltas to 0
         for delta in self.linear_deltas:
             torch.nn.init.constant_(delta.weight, 0)
 
-        # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-        torch.nn.init.normal_(self.cls_token, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
 
         # initialize nn.Linear and nn.LayerNorm
@@ -231,32 +294,39 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_encoder(self, x, mask_ratio):
         # embed patches
-        if self.frame_zero:
-            # only take in frame 0
-            # normal behavior
-            x_ = self.patch_embed(x[:, :, 0, :, :])
+        if self.videomae:
+            out = self.videomae_model(pixel_values=x.permute(0,2,1,3,4), output_hidden_states=True)
+            x = out["last_hidden_state"]
+            latents = out["hidden_states"]
+            ids_restore = torch.arange(x.shape[1]).unsqueeze(0).repeat(x.shape[0], 1).to(x.device)
+            return x, None, ids_restore, latents
         else:
-            x_ = []
-            for a in range(x.shape[2]):
-                x_.append(self.patch_embed(x[:, :, a, :, :]))
-            x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
-            x_ = rearrange(x_, 'n t c d -> n (t c) d')
+            if self.frame_zero:
+                # only take in frame 0
+                # normal behavior
+                x_ = self.patch_embed(x[:, :, 0, :, :])
+            else:
+                x_ = []
+                for a in range(x.shape[2]):
+                    x_.append(self.patch_embed(x[:, :, a, :, :]))
+                x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
+                x_ = rearrange(x_, 'n t c d -> n (t c) d')
 
-        # add pos embed w/o cls token
-        x = x_ + self.pos_embed
+            # add pos embed w/o cls token
+            x = x_ + self.pos_embed
 
-        # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
-        
+            # masking: length -> length * mask_ratio
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
+            
 
-        # apply Transformer blocks
-        latents = []
-        for blk in self.blocks:
-            x = blk(x)
-            latents.append(x)
-        x = self.norm(x)
+            # apply Transformer blocks
+            latents = []
+            for blk in self.blocks:
+                x = blk(x)
+                latents.append(x)
+            x = self.norm(x)
 
-        return x, mask, ids_restore, latents
+            return x, mask, ids_restore, latents
     def decoder_step(self, x, mask_tokens, frame_token=None):
         if self.random_frames:
             assert frame_token is not None, "Need to provide frame number to use the random_frames functionality"
@@ -289,8 +359,16 @@ class MaskedAutoencoderViT(nn.Module):
         x_ = x_ + p_
         mask_tokens = self.mask_token.repeat(x_.shape[0], self.num_points*self.number_of_frames, 1) + self.decoder_pos_embed_gaussian
         if self.random_frames:
-            random_frame = torch.randint(low=1, high=self.total_frames, size=()) if not frame_num else frame_num
-            frame_token = self.frame_pos_embed[:, random_frame:random_frame+1, :].repeat(x_.shape[0], 1, 1)
+            if self.pairwise_random_frames:
+                rf_1 = torch.randint(low=0, high=self.total_frames, size=()) if not frame_num else frame_num[0]
+                rf_2 = torch.randint(low=0, high=self.total_frames, size=()) if not frame_num else frame_num[1]
+                ft_1 = self.frame_pos_embed[:, rf_1:rf_1+1, :].repeat(x_.shape[0], 1, 1)
+                ft_2 = self.frame_pos_embed[:, rf_2:rf_2+1, :].repeat(x_.shape[0], 1, 1)
+                frame_token = torch.cat([ft_1, ft_2], dim=1)
+                random_frame = (rf_1, rf_2)
+            else:
+                random_frame = torch.randint(low=1, high=self.total_frames, size=()) if not frame_num else frame_num
+                frame_token = self.frame_pos_embed[:, random_frame:random_frame+1, :].repeat(x_.shape[0], 1, 1)
             x_points = self.decoder_step(x_, mask_tokens, frame_token=frame_token)                
         else:
             x_points = self.decoder_step(x_, mask_tokens, frame_token=None)
@@ -338,6 +416,7 @@ class MaskedAutoencoderViT(nn.Module):
             viewmat[:, :2, 3] = random_vector
         else:
             viewmat = self.viewmat.to(dtype=dtype).to(device=device)
+        
         self.Ks = self.Ks.to(dtype=dtype).to(device=device)
 
 
@@ -346,7 +425,6 @@ class MaskedAutoencoderViT(nn.Module):
 
         for i in range(means.shape[0]):
             images_per_video = []
-            # render first image
             means_ = means[i].contiguous().view(-1, 3)[:limit_gaussian]
             scales_ = scales[i].contiguous().view(-1, 3)[:limit_gaussian]
             quats_ = quats[i].contiguous().view(-1, 4)[:limit_gaussian]
@@ -463,15 +541,21 @@ class MaskedAutoencoderViT(nn.Module):
 
         return imgs_
         
-    def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_depth=False, return_corres=False):
+    def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_depth=False, return_corres=False, camera_jitter=False):
         init_imgs = []
         next_imgs = []
         gaussian_centers = []
 
         for i in range(1, self.total_frames):
             with torch.no_grad():
-                x_points = self.forward_decoder(x, ids_restore, limit_gaussian=limit_gaussian, frame_num=i)
-                imgs_ = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_depth=return_depth, return_corres=return_corres).cpu()
+                if self.pairwise_random_frames:
+                    random_first_frame = torch.randint(low=0, high=i, size=())
+                    frame_num = (random_first_frame.item(), i)
+                else:
+                    frame_num = i
+
+                x_points = self.forward_decoder(x, ids_restore, limit_gaussian=limit_gaussian, frame_num=frame_num)
+                imgs_ = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_depth=return_depth, return_corres=return_corres, camera_jitter=camera_jitter).cpu()
 
                 if return_corres:
                     gaussians = self.forward_render(x_points, limit_gaussian_z=limit_gaussian_z, return_gaussians=True)[1]

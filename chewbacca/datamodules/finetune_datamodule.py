@@ -70,7 +70,7 @@ class FinetuneDataModule(LightningDataModule):
                 from chewbacca.datamodules.components.point_tracking_eval_dataset import PointTrackingEvalDataset
 
                 pickle_files = [
-                    "/home/tekotan/Chewbacca_test/data-download/tapvid_davis/tapvid_davis.pkl",
+                    "/home/ubuntu/Chewbacca_test/data-download/tapvid_davis/tapvid_davis.pkl",
                     # "/home/tekotan/Chewbacca_test/data-download/tapvid_rgb_stacking/tapvid_rgb_stacking.pkl",
                     # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0000_of_0010.pkl",
                     # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0001_of_0010.pkl",
@@ -96,8 +96,8 @@ class FinetuneDataModule(LightningDataModule):
                 video_paths_val = np.load("data/mot_train_label.npy")
             else:
                 video_paths_val = np.load("data/mot_val_label.npy")
-            self.data_train = VideoAnnotationDataset(self.hparams.cfg, video_paths_train, "/datasets/motsynth_2024-01-10_1813/MOTSynth_mot_annotations/mot_annotations/", train=True)
-            self.data_val = VideoAnnotationDataset(self.hparams.cfg, video_paths_val, "/datasets/motsynth_2024-01-10_1813/MOTSynth_mot_annotations/mot_annotations/", train=False)
+            self.data_train = VideoAnnotationDataset(self.hparams.cfg, video_paths_train, "/datasets/motsynth/current/MOTSynth_mot_annotations/mot_annotations/", train=True)
+            self.data_val = VideoAnnotationDataset(self.hparams.cfg, video_paths_val, "/datasets/motsynth/current/MOTSynth_mot_annotations/mot_annotations/", train=False)
         else:
             raise ValueError("Invalid Dataset Specification")
 

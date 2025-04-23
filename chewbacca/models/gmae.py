@@ -132,11 +132,17 @@ class GMAELitModule(LightningModule):
                                                                     rgb_deltas_scale=self.cfg.rgb_deltas_scale,
                                                                     upsample_gaussians=self.cfg.upsample_gaussians,
                                                                     spawning=self.cfg.spawning,
-                                                                    frame_zero=self.cfg.frame_zero
+                                                                    frame_zero=self.cfg.frame_zero,
+                                                                    pairwise_random_frames=self.cfg.pairwise_random_frames,
+                                                                    videomae=self.cfg.videomae,
                                                                 )
             
         
-        num_hidden_layers = len(self.encoder.blocks)
+        if self.cfg.videomae:
+            num_hidden_layers = len(self.encoder.videomae_model.encoder.layer) + 1
+        else:
+            num_hidden_layers = len(self.encoder.blocks)
+            
         hsize = self.encoder.patch_embed.proj.weight.shape[0]
 
         if "attn" in self.cfg.training_type:
@@ -158,7 +164,10 @@ class GMAELitModule(LightningModule):
         self.test_rfid = FrechetInceptionDistance()
 
         if self.cfg.camera_jitter:
-            self.perceptual_loss = lpips.LPIPS(net='vgg')
+            self.perceptual_loss = lpips.LPIPS(net='vgg').requires_grad_(False)
+            for _, p in self.perceptual_loss.named_parameters():
+                p.requires_grad = False
+
 
         # create folders for storing results
         os.makedirs(self.cfg.storage_folder + "/results/", exist_ok=True)
@@ -421,15 +430,22 @@ class GMAELitModule(LightningModule):
                     x_points, random_frame = self.encoder.forward_decoder(latent, ids_restore)
                     pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)  # [N, L, p*p*3]
                     loss = self.forward_loss(video, pred, mask, frame_num=random_frame, deltas=deltas, additional_data=None)
+                    if self.cfg.joint_random_frames > 1:
+                        for k in range(1, self.cfg.joint_random_frames):
+                            x_points_, random_frame = self.encoder.forward_decoder(latent, ids_restore)
+                            B, N, _ = x_points_.shape
+                            loss += F.mse_loss(x_points_[:, :N//2], x_points[:, :N//2]) * 0.5
+                            pred, deltas = self.encoder.forward_render(x_points, return_deltas=True)
+                            loss += self.forward_loss(video, pred, mask, frame_num=random_frame, deltas=deltas, additional_data=None)
+                        loss /= self.cfg.joint_random_frames
                     if self.cfg.camera_jitter:
-                        import ipdb; ipdb.set_trace()
                         imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
                         imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
-                        imgs = (video * imagenet_std[None, :, None, None]) + imagenet_mean[None, :, None, None]
-                        gt = torch.cat([imgs_[:, :, 0:1], imgs_[:, :, frame_num:frame_num+1]], axis=2)
-                        jitter_pred = self.encoder.forward_render(x_points)
-                        loss += self.perceptual_loss(jitter_pred[:, :, 0], gt[:, :, 0])
-                        loss += self.perceptual_loss(jitter_pred[:, :, 1], gt[:, :, 1])
+                        imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
+                        gt = torch.cat([imgs[:, :, 0:1], imgs[:, :, random_frame:random_frame+1]], axis=2) * 2 - 1
+                        jitter_pred = self.encoder.forward_render(x_points, camera_jitter=True).permute(0,4,1,2,3) * 2 - 1
+                        loss += self.perceptual_loss(jitter_pred[:, :, 0], gt[:, :, 0]).mean() * 0.1
+                        loss += self.perceptual_loss(jitter_pred[:, :, 1], gt[:, :, 1]).mean() * 0.1
 
                 else:
                     x_points = self.encoder.forward_decoder(latent, ids_restore)
@@ -438,7 +454,8 @@ class GMAELitModule(LightningModule):
 
 
                 # save the masked images and reconstructed images
-                if "save-images" in self.cfg.training_type and batch_idx<1 and not self.training and (self.current_epoch+1)%10==0:
+                # if "save-images" in self.cfg.training_type and batch_idx<1 and not self.training and (self.current_epoch+1)%10==0:
+                if "save-images" in self.cfg.training_type and batch_idx<1:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                     # renormalize to 0,1
@@ -457,7 +474,7 @@ class GMAELitModule(LightningModule):
                                 if not self.cfg.random_frames:
                                     pred_ = self.encoder.forward_render(x_points, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences)
                                 else:
-                                    pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences)
+                                    pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences, camera_jitter=self.cfg.camera_jitter)
                                 preds_all.append(pred_)
                         preds_2 = torch.stack(preds_all, dim=0)
                         pred_ab = []
@@ -710,7 +727,8 @@ class GMAELitModule(LightningModule):
             self.test_rfid.reset()
 
         # for linear probe accuracy on imagenet and k400, compute and log the accuracy
-        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type or "ssv2" in self.cfg.training_type):
+        if("imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type or 
+            "ssv2" in self.cfg.training_type or "kinetics" in self.cfg.training_type):
             for i, layer_ in enumerate(self.linear_layer):
                 self.log("val/linear_probe_acc_" + str(i), self.val_acc[i].compute().item(), prog_bar=True, sync_dist=True)
                 log.info("Accuracy : " + str(self.val_acc[i].compute().item()))
