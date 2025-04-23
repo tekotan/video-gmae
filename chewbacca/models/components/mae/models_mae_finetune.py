@@ -213,7 +213,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         self.patch_embed.requires_grad = False
 
         if self.videomae:
-            self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base")
+            self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-large")
         else:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, embed_dim), requires_grad=False)

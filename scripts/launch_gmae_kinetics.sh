@@ -91,11 +91,9 @@
 # !/bin/bash
 python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
-hydra/launcher=submitit_slurm \
-launcher=slurm_em \
 model._target_="chewbacca.models.gmae.GMAELitModule" \
 datamodule._target_="chewbacca.datamodules.video_datamodule.VideoDataModule" \
-task_name=videomae_base_kinetics_linear_probing_v1 \
+task_name=videomae_base_kinetics_linear_probing_v2 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -105,10 +103,10 @@ configs.input_size=224 \
 configs.lr=1e-3 \
 configs.weight_decay=5e-2 \
 trainer.accumulate_grad_batches=1 \
-configs.train_batch_size=4 \
-configs.test_batch_size=4 \
-configs.train_num_workers=8 \
-configs.test_num_workers=8 \
+configs.train_batch_size=256 \
+configs.test_batch_size=256 \
+configs.train_num_workers=16 \
+configs.test_num_workers=16 \
 trainer.gradient_clip_val=2.0 \
 configs.scheduler="cosine_step" \
 configs.lr_interval="step" \
@@ -123,7 +121,7 @@ configs.mean_deltas=True \
 configs.num_classes=400 \
 configs.vocab_size=256 \
 configs.dataset_type="video" \
-configs.solver=LAMB \
+configs.solver=AdamW \
 configs.videomae=True \
 trainer.limit_train_batches=50000000 \
 trainer.limit_val_batches=5000000 \
