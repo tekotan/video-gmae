@@ -135,11 +135,14 @@ class GMAELitModule(LightningModule):
                                                                     frame_zero=self.cfg.frame_zero,
                                                                     pairwise_random_frames=self.cfg.pairwise_random_frames,
                                                                     videomae=self.cfg.videomae,
+                                                                    mae_st=self.cfg.mae_st,
                                                                 )
             
         
         if self.cfg.videomae:
             num_hidden_layers = len(self.encoder.videomae_model.encoder.layer) + 1
+        elif self.cfg.mae_st:
+            num_hidden_layers = len(self.encoder.mae_st_model.blocks)
         else:
             num_hidden_layers = len(self.encoder.blocks)
             

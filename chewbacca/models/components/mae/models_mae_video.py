@@ -41,6 +41,8 @@ from gsplat import rasterization
 import matplotlib.pyplot as plt
 
 from transformers import VideoMAEModel
+from chewbacca.models.components.mae_st.models_vit import vit_large_patch16 as mae_st_vit_large_patch16
+
 
 
 
@@ -160,7 +162,7 @@ class MaskedAutoencoderViT(nn.Module):
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
                  deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
                  rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False,
-                 pairwise_random_frames=False, videomae=False, training_type=None):
+                 pairwise_random_frames=False, videomae=False, training_type=None, mae_st=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
@@ -175,6 +177,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.frame_zero = frame_zero
         self.videomae = videomae
         self.training_type = training_type
+        self.mae_st = mae_st
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
@@ -182,7 +185,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.number_of_frames = number_of_frames if not self.random_frames else 2
         self.total_frames = number_of_frames
         
-        if self.videomae:
+        if self.videomae or self.mae_st:
             self.total_frames = 16
 
         self.input_frames = 1 if self.frame_zero else self.total_frames
@@ -191,8 +194,24 @@ class MaskedAutoencoderViT(nn.Module):
         num_patches = self.patch_embed.num_patches
         self.scale_factor = scale_factor
         self.scale_vocab = int(scale_vocab)
-        if self.videomae:
+        if self.videomae == "large":
+            self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-large")
+        elif self.videomae == "base":
             self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base")
+        elif self.mae_st == "large":
+            self.mae_st_model = mae_st_vit_large_patch16(num_frames=16, t_patch_size=2)
+            checkpoint = torch.load("./logs/checkpoints/mae_pretrain_vit_large_k400.pth", map_location="cpu")
+            checkpoint_model = checkpoint["model_state"]
+            state_dict = self.mae_st_model.state_dict()
+            for k in ["head.weight", "head.bias"]:
+                if (
+                    k in checkpoint_model
+                    and checkpoint_model[k].shape != state_dict[k].shape
+                ):
+                    print(f"Removing key {k} from pretrained checkpoint")
+                    del checkpoint_model[k]
+            
+            msg = self.mae_st_model.load_state_dict(checkpoint_model, strict=False)
         else:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
@@ -285,7 +304,7 @@ class MaskedAutoencoderViT(nn.Module):
             self.pos_embed_t[:, :1, :] = 0
 
         else:
-            if not self.videomae:
+            if not self.videomae and not self.mae_st:
                 pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
                 self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
@@ -383,11 +402,36 @@ class MaskedAutoencoderViT(nn.Module):
     def forward_encoder(self, x, mask_ratio):
         # embed patches
         if self.videomae:
-            out = self.videomae_model(pixel_values=x.permute(0,2,1,3,4), output_hidden_states=True)
+            x = self.videomae_model.embeddings.patch_embeddings(x.permute(0,2,1,3,4))
+            x = x + self.videomae_model.embeddings.position_embeddings.type_as(x).to(device=x.device, copy=True)
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
+            out = self.videomae_model.encoder(x, output_hidden_states=True)
+
             x = out["last_hidden_state"]
             latents = out["hidden_states"]
-            ids_restore = torch.arange(x.shape[1]).unsqueeze(0).repeat(x.shape[0], 1).to(x.device)
-            return x, None, ids_restore, latents
+
+            return x, mask, ids_restore, latents
+        elif self.mae_st:
+            # mae_st takes normalized pixels in [0,1] interval
+
+            imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=x.device).to(dtype=x.dtype)
+            imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=x.device).to(dtype=x.dtype)
+            x = (x * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
+
+            x = self.mae_st_model.patch_embed(x)
+            N, T, L, C = x.shape
+            x = x.view([N, T * L, C])
+            x = x + self.mae_st_model.pos_embed[:, :T*self.mae_st_model.patch_embed.num_patches]
+
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
+
+            latents = []
+            for blk in self.mae_st_model.blocks:
+                x = blk(x)
+                latents.append(x)
+            x = self.mae_st_model.norm(x)
+
+            return x, mask, ids_restore, latents
         else:
             if self.frame_zero:
                 # only take in frame 0

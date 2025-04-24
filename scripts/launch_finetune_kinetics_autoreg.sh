@@ -1,11 +1,9 @@
 # !/bin/bash
 python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
-hydra/launcher=submitit_slurm \
-launcher=slurm_em \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vit_base_kinetics_finetune_point_tracking_crossattn_v1 \
+task_name=TEST_vit_base_kinetics_finetune_point_tracking_crossattn_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -15,7 +13,7 @@ configs.input_size=256 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
 trainer.accumulate_grad_batches=1 \
-configs.train_batch_size=2 \
+configs.train_batch_size=4 \
 configs.test_batch_size=4 \
 configs.train_num_workers=1 \
 configs.test_num_workers=1 \
@@ -31,7 +29,7 @@ trainer.limit_train_batches=1000 \
 trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
 configs.training_type="train_ucf101_point-tracking_save-images_no-mask" \
-configs.weights_path="/home/jathu/gmae_logs/b_vit_base_pretraining_test6/0/checkpoints/last.ckpt" \
+configs.weights_path="./logs/b_vit_base_pretraining_test6/0/checkpoints/last.ckpt" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \
 configs.finetune_params.reuse_decoder=False \
