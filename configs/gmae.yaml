@@ -260,6 +260,7 @@ configs:
     chunk_size: 1024
 
     videomae: False
+    mae_st: False
 
     inference:
         testing: False
