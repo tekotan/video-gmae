@@ -1198,3 +1198,114 @@ configs.training_type="k400_gaussian_save-images-z_no-mask_random-frames-attn" \
 configs.mask_ratio=0.95
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# python chewbacca/train.py -m \
+# --config-name gmae.yaml \
+# hydra/launcher=submitit_slurm \
+# launcher=slurm_x \
+# model._target_="chewbacca.models.gmae2.GMAELitModule" \
+# datamodule._target_="chewbacca.datamodules.video_datamodule.VideoDataModule" \
+# task_name=vgmae_large_k400_test1 \
+# trainer=ddp_unused \
+# trainer.devices=8 \
+# trainer.num_nodes=32 \
+# configs.task="pretrain" \
+# configs.model_name="mae_vit_large_patch16" \
+# configs.input_size=224 \
+# configs.dataset_type="video" \
+# configs.lr=1e-4 \
+# configs.weight_decay=0.0002 \
+# trainer.accumulate_grad_batches=1 \
+# configs.train_batch_size=2 \
+# configs.test_batch_size=2 \
+# configs.train_num_workers=8 \
+# configs.test_num_workers=8 \
+# trainer.gradient_clip_val=2.0 \
+# configs.warmup_steps=10 \
+# trainer.max_epochs=90 \
+# configs.num_classes=400 \
+# configs.load_strict=False \
+# callbacks.model_checkpoint.every_n_epochs=10 \
+# configs.training_type="k400_gaussian_save-images-z_no-mask_random-frames-attn_remove-probe-layers_interpolate-pos-emb" \
+# configs.vocab_size=256 \
+# configs.seq_length=8 \
+# configs.deltas_reg_weight=0.0 \
+# configs.random_frames=False \
+# configs.rgb_deltas=True \
+# configs.mean_deltas=True \
+# configs.scale_vocab=1 \
+# configs.sample_rate=1 \
+# configs.mask_ratio=0.95 \
+# configs.solver="AdamW" \
+# configs.weights_path="/private/home/jathushan/3D/video_gmae/logs/gmae_large_imagenet_test1/0/checkpoints/last.ckpt" \
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+python chewbacca/train.py -m \
+--config-name gmae.yaml \
+hydra/launcher=submitit_slurm \
+launcher=slurm_x \
+model._target_="chewbacca.models.gmae2.GMAELitModule" \
+datamodule._target_="chewbacca.datamodules.video_datamodule.VideoDataModule" \
+task_name=vgmae_large_k400_test2 \
+trainer=ddp_unused \
+trainer.devices=8 \
+trainer.num_nodes=32 \
+configs.task="pretrain" \
+configs.model_name="mae_vit_large_patch16" \
+configs.input_size=224 \
+configs.dataset_type="video" \
+configs.lr=1e-4 \
+configs.weight_decay=0.0002 \
+trainer.accumulate_grad_batches=1 \
+configs.train_batch_size=2 \
+configs.test_batch_size=2 \
+configs.train_num_workers=8 \
+configs.test_num_workers=8 \
+trainer.gradient_clip_val=2.0 \
+configs.warmup_steps=40 \
+trainer.max_epochs=400 \
+configs.num_classes=400 \
+configs.load_strict=False \
+callbacks.model_checkpoint.every_n_epochs=10 \
+configs.training_type="k400_gaussian_save-images-z_no-mask_random-frames-attn_remove-probe-layers_interpolate-pos-emb" \
+configs.vocab_size=256 \
+configs.seq_length=8 \
+configs.deltas_reg_weight=0.0 \
+configs.random_frames=False \
+configs.rgb_deltas=True \
+configs.mean_deltas=True \
+configs.scale_vocab=1 \
+configs.sample_rate=1 \
+configs.mask_ratio=0.95 \
+configs.solver="AdamW" \
+configs.weights_path="/private/home/jathushan/3D/video_gmae/logs/gmae_large_imagenet_test1/0/checkpoints/last.ckpt" \

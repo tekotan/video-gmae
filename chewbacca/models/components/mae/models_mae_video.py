@@ -43,6 +43,72 @@ import matplotlib.pyplot as plt
 from transformers import VideoMAEModel
 
 
+
+
+# --------------------------------------------------------
+# Interpolate position embeddings for high-resolution
+# References:
+# DeiT: https://github.com/facebookresearch/deit
+# --------------------------------------------------------
+def interpolate_pos_embed(model, checkpoint_model):
+    if 'encoder.pos_embed' in checkpoint_model:
+        pos_embed_checkpoint = checkpoint_model['encoder.pos_embed']
+        embedding_size = pos_embed_checkpoint.shape[-1]
+        num_extra_tokens_old = 0
+
+        num_patches = model.patch_embed.num_patches
+        num_extra_tokens = model.pos_embed.shape[-2] - num_patches
+        # height (== width) for the checkpoint position embedding
+        orig_size = int((pos_embed_checkpoint.shape[-2]-num_extra_tokens_old) ** 0.5)
+        # height (== width) for the new position embedding
+        new_size = int(num_patches ** 0.5)
+        # class_token and dist_token are kept unchanged
+        if orig_size != new_size:
+            print("Position interpolate from %dx%d to %dx%d" % (orig_size, orig_size, new_size, new_size))
+            extra_tokens = model.pos_embed[:, :1]
+            # only the position tokens are interpolated
+            pos_tokens = pos_embed_checkpoint[:, num_extra_tokens_old:]
+            pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
+            pos_tokens = torch.nn.functional.interpolate(
+                pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
+            pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
+            new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
+            new_pos_embed
+        
+            return new_pos_embed
+
+
+
+def interpolate_pos_embed2(model, checkpoint_model):
+    if 'encoder.decoder_pos_embed' in checkpoint_model:
+        pos_embed_checkpoint = checkpoint_model['encoder.decoder_pos_embed']
+        embedding_size = pos_embed_checkpoint.shape[-1]
+        num_extra_tokens_old = 0
+
+        num_patches = model.patch_embed.num_patches
+        num_extra_tokens = model.decoder_pos_embed.shape[-2] - num_patches
+        # height (== width) for the checkpoint position embedding
+        orig_size = int((pos_embed_checkpoint.shape[-2]-num_extra_tokens_old) ** 0.5)
+        # height (== width) for the new position embedding
+        new_size = int(num_patches ** 0.5)
+        # class_token and dist_token are kept unchanged
+        if orig_size != new_size:
+            print("Position interpolate from %dx%d to %dx%d" % (orig_size, orig_size, new_size, new_size))
+            extra_tokens = model.decoder_pos_embed[:, :1]
+            # only the position tokens are interpolated
+            pos_tokens = pos_embed_checkpoint[:, num_extra_tokens_old:]
+            pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
+            pos_tokens = torch.nn.functional.interpolate(
+                pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
+            pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
+            new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
+            new_pos_embed
+        
+            return new_pos_embed
+
+
+
+
 class CausalAttention(Attention):
     def forward(self, x):
 
@@ -94,7 +160,7 @@ class MaskedAutoencoderViT(nn.Module):
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
                  deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
                  rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False,
-                 pairwise_random_frames=False, videomae=False):
+                 pairwise_random_frames=False, videomae=False, training_type=None):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
@@ -108,6 +174,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.spawning = spawning
         self.frame_zero = frame_zero
         self.videomae = videomae
+        self.training_type = training_type
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
@@ -191,32 +258,53 @@ class MaskedAutoencoderViT(nn.Module):
         self.linear_deltas = nn.ModuleList([nn.Linear(decoder_embed_dim + self.params_per_gaussian, \
                                             int(self.params_per_gaussian * self.scale_vocab * upsample), bias=False) for upsample in self.upsample_gaussians])
 
+        if "interpolate" in self.training_type:
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # fixed sin-cos embedding
+            self.pos_embed_t = nn.Parameter(torch.zeros(1, self.number_of_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
+
+            self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
+            
+        
+        
         self.initialize_weights()
 
 
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        if not self.videomae:
-            pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
+
+        if "interpolate" in self.training_type:
+            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
             self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-            # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
-            w = self.patch_embed.proj.weight.data
-            torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+            decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
+            self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
 
-            # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-            torch.nn.init.normal_(self.cls_token, std=.02)
+            pos_embed_t = get_1d_sincos_pos_embed_from_grid(self.pos_embed_t.shape[-1], np.array(list(range(self.number_of_frames))))
+            self.pos_embed_t.data.copy_(torch.from_numpy(pos_embed_t).float().unsqueeze(0))
+            self.pos_embed_t[:, :1, :] = 0
+
+        else:
+            if not self.videomae:
+                pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
+                self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+                # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+                w = self.patch_embed.proj.weight.data
+                torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+                # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
+                torch.nn.init.normal_(self.cls_token, std=.02)
 
 
-        decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
-        self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
-        
-        if self.random_frames:
-            frame_pos_embed = get_1d_sincos_pos_embed_from_grid(self.frame_pos_embed.shape[-1], np.array(list(range(self.total_frames))))
-            self.frame_pos_embed.data.copy_(torch.from_numpy(frame_pos_embed).float().unsqueeze(0))
+            decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
+            self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
+            
+            if self.random_frames:
+                frame_pos_embed = get_1d_sincos_pos_embed_from_grid(self.frame_pos_embed.shape[-1], np.array(list(range(self.total_frames))))
+                self.frame_pos_embed.data.copy_(torch.from_numpy(frame_pos_embed).float().unsqueeze(0))
 
-        
+            
 
         # initialize gaussian deltas to 0
         for delta in self.linear_deltas:
@@ -310,15 +398,29 @@ class MaskedAutoencoderViT(nn.Module):
                 for a in range(x.shape[2]):
                     x_.append(self.patch_embed(x[:, :, a, :, :]))
                 x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
-                x_ = rearrange(x_, 'n t c d -> n (t c) d')
+                
 
             # add pos embed w/o cls token
-            x = x_ + self.pos_embed
+            if "interpolate" in self.training_type:
+                # spatial pos embed
+                x_ = x_ + self.pos_embed[:, None, 1:, :]
+                # temporal pos embed
+                x_ = x_ + self.pos_embed_t[:, :, None, :]
+                #
+                x = rearrange(x_, 'n t c d -> n (t c) d')
+            else:
+                x_ = rearrange(x_, 'n t c d -> n (t c) d')
+                x = x_ + self.pos_embed
 
             # masking: length -> length * mask_ratio
             x, mask, ids_restore = self.random_masking(x, mask_ratio)
             
-
+            if "interpolate" in self.training_type:
+                # add cls token
+                cls_token = self.cls_token + self.pos_embed[:, :1, :]
+                cls_tokens = cls_token.expand(x.shape[0], -1, -1)
+                x = torch.cat((cls_tokens, x), dim=1)
+            
             # apply Transformer blocks
             latents = []
             for blk in self.blocks:
@@ -326,6 +428,10 @@ class MaskedAutoencoderViT(nn.Module):
                 latents.append(x)
             x = self.norm(x)
 
+            if "interpolate" in self.training_type:
+                # remove cls token
+                x = x[:, 1:, :]
+                latents = [latent[:, 1:, :] for latent in latents]
             return x, mask, ids_restore, latents
     def decoder_step(self, x, mask_tokens, frame_token=None):
         if self.random_frames:
@@ -355,9 +461,13 @@ class MaskedAutoencoderViT(nn.Module):
         # choose pos embed for only the encoded patches
         ids_shuffle = torch.argsort(ids_restore, dim=1)
         ids_shuffle = ids_shuffle[:, :x_.shape[1]]  # remove cls token
-        p_ = torch.gather(self.decoder_pos_embed[:, :, :].repeat(x_.shape[0], 1, 1), dim=1, index=ids_shuffle.unsqueeze(-1).repeat(1, 1, self.decoder_pos_embed.shape[2]))  # unshuffle
-        x_ = x_ + p_
-        mask_tokens = self.mask_token.repeat(x_.shape[0], self.num_points*self.number_of_frames, 1) + self.decoder_pos_embed_gaussian
+        if "interpolate" in self.training_type:
+            x_ = x_ 
+        else:
+            p_ = torch.gather(self.decoder_pos_embed[:, :, :].repeat(x_.shape[0], 1, 1), dim=1, index=ids_shuffle.unsqueeze(-1).repeat(1, 1, self.decoder_pos_embed.shape[2]))  # unshuffle
+            x_ = x_ + p_
+        mask_tokens = self.mask_token.repeat(1, self.num_points*self.number_of_frames, 1) + self.decoder_pos_embed_gaussian
+        mask_tokens = mask_tokens.repeat(x_.shape[0], 1, 1)
         if self.random_frames:
             if self.pairwise_random_frames:
                 rf_1 = torch.randint(low=0, high=self.total_frames, size=()) if not frame_num else frame_num[0]

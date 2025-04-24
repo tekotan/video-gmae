@@ -135,6 +135,7 @@ class GMAELitModule(LightningModule):
                                                                     frame_zero=self.cfg.frame_zero,
                                                                     pairwise_random_frames=self.cfg.pairwise_random_frames,
                                                                     videomae=self.cfg.videomae,
+                                                                    training_type=self.cfg.training_type,
                                                                 )
             
         
@@ -175,7 +176,7 @@ class GMAELitModule(LightningModule):
         os.makedirs(self.cfg.storage_folder + "/videos/", exist_ok=True)
         log.info("Storage folder : " + self.cfg.storage_folder)
 
-        if(self.cfg.solver=="LARS" or self.cfg.solver=="LAMB" or("probe" in self.cfg.training_type and "remove-probe-layers" not in self.cfg.training_type)):
+        if(self.cfg.solver=="LARS" or self.cfg.solver=="LAMB"):
             # freeze all layers except fc
             for _, p in self.encoder.named_parameters():
                 p.requires_grad = False
@@ -307,6 +308,7 @@ class GMAELitModule(LightningModule):
                 return loss_dict, extras_, logits_
 
             if "gaussian" in self.cfg.training_type:
+                import ipdb; ipdb.set_trace()
                 latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(image, mask_ratio=self.cfg.mask_ratio)
                 # x_points_main = self.encoder.forward_decoder(latent, ids_restore)
                 pred_main = self.encoder.forward_decoder(latent, ids_restore)

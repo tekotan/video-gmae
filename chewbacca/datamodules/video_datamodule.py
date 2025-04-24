@@ -77,6 +77,7 @@ class VideoDataModule(LightningDataModule):
                                             filter_long_videos=int(10**9), duration=None)
 
         elif "k400" in self.hparams.cfg.training_type:
+            from chewbacca.datamodules.components.video_dataset import VideoDataset
             video_paths_train = np.load("data/kinetics_400_train_label.npy")
             video_paths_val = np.load("data/kinetics_400_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
