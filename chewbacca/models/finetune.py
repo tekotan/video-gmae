@@ -976,7 +976,8 @@ class FinetuneLitModule(LightningModule):
 
         if self.mode == "object-tracking":
             loss_dict, extra, logits_cls = self.step(batch, batch_idx, return_images=True)
-
+            
+            query_points = batch[1]
             target_boxes = batch[2]
             pred_boxes = extra["box_pred"]
 
@@ -989,11 +990,30 @@ class FinetuneLitModule(LightningModule):
                 extra["box_pred"].shape[-1] == self.cfg.finetune_params.quantize_output_bins:
                 
                 pred_boxes = torch.argmax(pred_boxes, dim=-1) / self.cfg.finetune_params.quantize_output_bins
-            self.box_mse.update(target_boxes.contiguous(), pred_boxes.contiguous())
 
-            # Update IoU metric
-            iou = calculate_iou(target_boxes, pred_boxes)
-            self.box_iou.update(iou)
+            for i in range(query_points.shape[0]):
+                first_invalid_index = torch.where(query_points[i, :, 0] == -1)[0]
+
+                if len(first_invalid_index) == 0:
+                    first_invalid_index = target_boxes.shape[1]
+                else:
+                    first_invalid_index = first_invalid_index[0]
+
+                pred_boxes_ = pred_boxes[i:i+1, :first_invalid_index] * self.cfg.input_size
+                # pred_visible_ = pred_visible[i:i+1, :first_invalid_index]
+
+                true_boxes_ = true_boxes[i:i+1, :first_invalid_index] * self.cfg.input_size
+                # true_visible_ = true_visible[i:i+1, :first_invalid_index]
+
+                # if set((1 - (~true_visible_).detach().cpu().numpy()).flatten().tolist()) == {0}:
+                #     log.info(f"Skipping batch {batch_idx} for point tracking, all points are occluded")
+                #     continue
+
+                self.box_mse.update(true_boxes_.contiguous(), pred_boxes_.contiguous())
+
+                # Update IoU metric
+                iou = calculate_iou(true_boxes_, pred_boxes_)
+                self.box_iou.update(iou)
 
         loss = sum([v for k,v in loss_dict.items()])
 

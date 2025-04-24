@@ -1,8 +1,6 @@
 # !/bin/bash
 python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
-hydra/launcher=submitit_slurm \
-launcher=slurm_em \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
 task_name=vit_base_kinetics_finetune_object_tracking_crossattn_v1 \
@@ -15,7 +13,7 @@ configs.input_size=256 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
 trainer.accumulate_grad_batches=1 \
-configs.train_batch_size=2 \
+configs.train_batch_size=4 \
 configs.test_batch_size=4 \
 configs.train_num_workers=1 \
 configs.test_num_workers=1 \
