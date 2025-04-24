@@ -26,6 +26,8 @@ import torch
 import torch.nn.functional as F
 from transformers import VideoMAEModel
 
+from chewbacca.models.components.mae_st.models_vit import vit_large_patch16 as mae_st_vit_large_patch16
+
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
 
@@ -149,7 +151,6 @@ class CrossAttentionReadout(nn.Module):
         # Layer norms
         self.norm = nn.LayerNorm(embed_dim)
         self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
 
         # Temporal embeddings
         self.enc_temporal_embed = nn.Parameter(torch.zeros(1, num_enc_tokens, embed_dim))
@@ -170,13 +171,6 @@ class CrossAttentionReadout(nn.Module):
             nn.Linear(512, 512),
             nn.GELU(),
             nn.Linear(512, embed_dim)
-        )
-
-        # Residual MLP
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
-            nn.GELU(),
-            nn.Linear(embed_dim * 4, embed_dim)
         )
 
         # Output projection
@@ -201,19 +195,43 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                  number_of_frames=2, reuse_decoder=False, num_fourier_features=16,
                  batch_prediction=True, new_readout_mode=True, zero_t_prediction=False,
                  autoregressive=False, quantized_prediction=False, quantize_output_bins=None, dit_head=False,
-                 use_dit_decoder=False, videomae=False):
+                 use_dit_decoder=False, videomae=False, mae_st=False):
         # Original initialization code preserved
         nn.Module.__init__(self)
         self.number_of_frames = number_of_frames
         self.total_frames = number_of_frames
         self.videomae = videomae
+        self.mae_st = mae_st
         
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
         self.patch_embed.requires_grad = False
 
-        if self.videomae:
+        if self.videomae == "large":
             self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-large")
+            for name, param in self.videomae_model.named_parameters():
+                param.requires_grad = False
+        elif self.videomae == "base":
+            self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base")
+            for name, param in self.videomae_model.named_parameters():
+                param.requires_grad = False
+        elif self.mae_st == "large":
+            self.mae_st_model = mae_st_vit_large_patch16(num_frames=16, t_patch_size=2)
+            checkpoint = torch.load("./logs/checkpoints/mae_pretrain_vit_large_k400.pth", map_location="cpu")
+            checkpoint_model = checkpoint["model_state"]
+            state_dict = self.mae_st_model.state_dict()
+            for k in ["head.weight", "head.bias"]:
+                if (
+                    k in checkpoint_model
+                    and checkpoint_model[k].shape != state_dict[k].shape
+                ):
+                    print(f"Removing key {k} from pretrained checkpoint")
+                    del checkpoint_model[k]
+            
+            msg = self.mae_st_model.load_state_dict(checkpoint_model, strict=False)
+            for name, param in self.mae_st_model.named_parameters():
+                param.requires_grad = False
+
         else:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, embed_dim), requires_grad=False)
@@ -243,11 +261,11 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             self.output_size = 3
             self.input_frames = 24
         
-        if self.videomae:
+        if self.videomae or self.mae_st:
             self.input_frames = 16
 
         if new_readout_mode:
-            enc_tokens = 49 * self.input_frames * 2 if self.videomae else 64 * 32 * self.cond_size #49 * self.input_frames
+            enc_tokens = 49 * self.input_frames * 2 if self.videomae or self.mae_st else 64 * 32 * self.cond_size #49 * self.input_frames
             self.readout = CrossAttentionReadout(
                 embed_dim=embed_dim,
                 cond_size=self.cond_size,
@@ -375,11 +393,40 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
     def forward_encoder(self, x, mask_ratio):
         # Original encoder code preserved
         if self.videomae:
-            out = self.videomae_model(pixel_values=x.permute(0,2,1,3,4), output_hidden_states=True)
+            x = self.videomae_model.embeddings.patch_embeddings(x.permute(0,2,1,3,4))
+            x = x + self.videomae_model.embeddings.position_embeddings.type_as(x).to(device=x.device, copy=True)
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
+            out = self.videomae_model.encoder(x, output_hidden_states=True)
+
             x = out["last_hidden_state"]
             latents = out["hidden_states"]
-            ids_restore = torch.arange(x.shape[1]).unsqueeze(0).repeat(x.shape[0], 1).to(x.device)
-            return x, None, ids_restore, latents
+
+            # out = self.videomae_model(pixel_values=x.permute(0,2,1,3,4), output_hidden_states=True)
+            # x = out["last_hidden_state"]
+            # latents = out["hidden_states"]
+            # ids_restore = torch.arange(x.shape[1]).unsqueeze(0).repeat(x.shape[0], 1).to(x.device)
+            return x, mask, ids_restore, latents
+        elif self.mae_st:
+            # mae_st takes normalized pixels in [0,1] interval
+
+            imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
+            imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
+            x = (x * imagenet_std[None, :, None, None]) + imagenet_mean[None, :, None, None]
+
+            x = self.mae_st_model.patch_embed(x)
+            N, T, L, C = x.shape
+            x = x.view([N, T * L, C])
+            x = x + self.mae_st_model.pos_embed[:, :T*self.mae_st_model.patch_embed.num_patches]
+
+            x, mask, ids_restore = self.random_masking(x, mask_ratio)
+
+            latents = []
+            for blk in self.mae_st_model.blocks:
+                x = blk(x)
+                latents.append(x)
+            x = self.mae_st_model.norm(x)
+
+            return x, mask, ids_restore, latents
         else:
             x_ = []
             for a in range(x.shape[2]):
@@ -484,11 +531,6 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 attn_output, _ = self.readout.cross_attn(queries_2frames, x, x)
                 queries_2frames = queries_2frames + attn_output
 
-                # MLP
-                queries_2frames = queries_2frames + self.readout.mlp(
-                    self.readout.norm2(queries_2frames)
-                )
-
                 # Output projection
                 outputs = self.readout.output_proj(queries_2frames)
                 outputs = outputs.view(B, N, F, self.output_size)
@@ -513,9 +555,6 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 queries = self.readout.norm1(queries)
                 attn_output, _ = self.readout.cross_attn(queries, x, x)
                 queries = queries + attn_output
-
-                # MLP
-                queries = queries + self.readout.mlp(self.readout.norm2(queries))
 
                 # Output projection
                 outputs = self.readout.output_proj(queries)
