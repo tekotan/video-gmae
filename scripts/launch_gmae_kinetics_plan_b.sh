@@ -32,6 +32,7 @@ configs.num_classes=400 \
 configs.vocab_size=256 \
 configs.dataset_type="video" \
 configs.camera_jitter=False \
+configs.videomae=False \
 configs.mae_st="large" \
 trainer.limit_train_batches=50000000 \
 trainer.limit_val_batches=5000000 \

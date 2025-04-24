@@ -41,6 +41,8 @@ from gsplat import rasterization
 import matplotlib.pyplot as plt
 
 from transformers import VideoMAEModel
+from chewbacca.models.components.mae_st.models_vit import vit_large_patch16 as mae_st_vit_large_patch16
+
 
 
 class CausalAttention(Attention):
@@ -94,7 +96,7 @@ class MaskedAutoencoderViT(nn.Module):
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
                  deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
                  rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False,
-                 pairwise_random_frames=False, videomae=False):
+                 pairwise_random_frames=False, videomae=False, mae_st=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
@@ -108,6 +110,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.spawning = spawning
         self.frame_zero = frame_zero
         self.videomae = videomae
+        self.mae_st = mae_st
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
@@ -115,7 +118,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.number_of_frames = number_of_frames if not self.random_frames else 2
         self.total_frames = number_of_frames
         
-        if self.videomae:
+        if self.videomae or self.mae_st:
             self.total_frames = 16
 
         self.input_frames = 1 if self.frame_zero else self.total_frames
@@ -129,7 +132,7 @@ class MaskedAutoencoderViT(nn.Module):
         elif self.videomae == "base":
             self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base")
         elif self.mae_st == "large":
-            self.mae_st_model = mae_st_vit_large_patch16(num_frames=16, t_path_size=2)
+            self.mae_st_model = mae_st_vit_large_patch16(num_frames=16, t_patch_size=2)
             checkpoint = torch.load("./logs/checkpoints/mae_pretrain_vit_large_k400.pth", map_location="cpu")
             checkpoint_model = checkpoint["model_state"]
             state_dict = self.mae_st_model.state_dict()
@@ -141,7 +144,7 @@ class MaskedAutoencoderViT(nn.Module):
                     print(f"Removing key {k} from pretrained checkpoint")
                     del checkpoint_model[k]
             
-            msg = model.load_state_dict(checkpoint_model, strict=False)
+            msg = self.mae_st_model.load_state_dict(checkpoint_model, strict=False)
         else:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
@@ -213,7 +216,7 @@ class MaskedAutoencoderViT(nn.Module):
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        if not self.videomae:
+        if not self.videomae and not self.mae_st:
             pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
             self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
@@ -323,8 +326,8 @@ class MaskedAutoencoderViT(nn.Module):
         elif self.mae_st:
             # mae_st takes normalized pixels in [0,1] interval
 
-            imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
-            imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
+            imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=x.device).to(dtype=x.dtype)
+            imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=x.device).to(dtype=x.dtype)
             x = (x * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
 
             x = self.mae_st_model.patch_embed(x)
