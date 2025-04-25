@@ -368,21 +368,44 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         else:
             self.linear_out = nn.Linear(decoder_embed_dim, self.params_per_out, bias=True)
 
+
+        if "interpolate" in self.training_type:
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # fixed sin-cos embedding
+            self.pos_embed_t = nn.Parameter(torch.zeros(1, self.number_of_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
+
+            self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
+
+        self.initialize_weights()
+
     def initialize_weights(self):
         # Original initialization code preserved
-        if not self.videomae:
-            pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
+        if "interpolate" in self.training_type:
+            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
             self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-            w = self.patch_embed.proj.weight.data
-            torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+            decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
+            self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
 
+            pos_embed_t = get_1d_sincos_pos_embed_from_grid(self.pos_embed_t.shape[-1], np.array(list(range(self.number_of_frames))))
+            self.pos_embed_t.data.copy_(torch.from_numpy(pos_embed_t).float().unsqueeze(0))
+            self.pos_embed_t[:, :1, :] = 0
+
+        else:
+            if not self.videomae and not self.mae_st:
+                pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.input_frames, cls_token=False)
+                self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+                # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+                w = self.patch_embed.proj.weight.data
+                torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+                # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
+                torch.nn.init.normal_(self.cls_token, std=.02)
+                
         if not self.new_readout_mode:
             decoder_pos_embed = get_3d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), self.total_frames, cls_token=False)
             self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
 
-        
-        torch.nn.init.normal_(self.cls_token, std=.02)
         if not self.new_readout_mode:
             if not self.reuse_decoder:
                 torch.nn.init.normal_(self.mask_token_fine, std=.02)
@@ -434,17 +457,35 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             for a in range(x.shape[2]):
                 x_.append(self.patch_embed(x[:, :, a, :, :]))
             x_ = torch.stack(x_, dim=1)[:, :self.input_frames]
-            x_ = rearrange(x_, 'n t c d -> n (t c) d')
-
-            x = x_ + self.pos_embed[:, :self.input_frames*self.patch_embed.num_patches]
+            
+            if "interpolate" in self.training_type:
+                # spatial pos embed
+                x_ = x_ + self.pos_embed[:, None, 1:, :]
+                # temporal pos embed
+                x_ = x_ + self.pos_embed_t[:, :self.input_frames*self.patch_embed.num_patches, None, :]
+                #
+                x = rearrange(x_, 'n t c d -> n (t c) d')
+            else:
+                x_ = rearrange(x_, 'n t c d -> n (t c) d')
+                x = x_ + self.pos_embed[:, :self.input_frames*self.patch_embed.num_patches]
 
             x, mask, ids_restore = self.random_masking(x, mask_ratio)
+
+            if "interpolate" in self.training_type:
+                # add cls token
+                cls_token = self.cls_token + self.pos_embed[:, :1, :]
+                cls_tokens = cls_token.expand(x.shape[0], -1, -1)
+                x = torch.cat((cls_tokens, x), dim=1)
 
             latents = []
             for blk in self.blocks:
                 x = blk(x)
                 latents.append(x)
             x = self.norm(x)
+            if "interpolate" in self.training_type:
+                # remove cls token
+                x = x[:, 1:, :]
+                latents = [latent[:, 1:, :] for latent in latents]
 
             return x, mask, ids_restore, latents
     def dit_step(self, x, dit_z, dit_training=True):
@@ -587,9 +628,13 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 
             ids_shuffle = torch.argsort(ids_restore, dim=1)
             ids_shuffle = ids_shuffle[:, :x_.shape[1]]
-            p_ = torch.gather(self.decoder_pos_embed[:, :, :].repeat(x_.shape[0], 1, 1), dim=1, index=ids_shuffle.unsqueeze(-1).repeat(1, 1, self.decoder_pos_embed.shape[2]))
-            x_ = x_ + p_
 
+            if "interpolate" in self.training_type:
+                x_ = x_ 
+            else:
+                p_ = torch.gather(self.decoder_pos_embed[:, :, :].repeat(x_.shape[0], 1, 1), dim=1, index=ids_shuffle.unsqueeze(-1).repeat(1, 1, self.decoder_pos_embed.shape[2]))  # unshuffle
+                x_ = x_ + p_
+                
             if self.batch_prediction:
                 if self.num_fourier_features > 0:
                     cond = fourier_encode_3d(cond, self.num_fourier_features)
