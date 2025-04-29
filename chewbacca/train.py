@@ -159,13 +159,13 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
 
                     if "remove-probe-layers" in cfg.configs.training_type:
                         av = {k: v for k, v in av.items() if "linear_layer" not in k}
-
                     if "interpolate-pos-emb" in cfg.configs.training_type:
                         from chewbacca.models.components.mae.models_mae_video import interpolate_pos_embed, interpolate_pos_embed2
-                        a1 = av['encoder.decoder_pos_embed_gaussian']
-                        a2 = torch.randn_like(model.encoder.decoder_pos_embed_gaussian)
-                        a2[:, :a1.shape[1], :] = a1
-                        av['encoder.decoder_pos_embed_gaussian'] = a2
+                        if "encoder.decoder_pos_embed" in av:
+                            a1 = av['encoder.decoder_pos_embed']
+                            a2 = torch.randn_like(model.encoder.decoder_pos_embed)
+                            a2[:, :a1.shape[1], :] = a1
+                            av['encoder.decoder_pos_embed'] = a2
 
 
                     out = model.load_state_dict(av, strict=cfg.configs.load_strict)
