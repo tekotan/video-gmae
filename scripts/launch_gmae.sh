@@ -317,13 +317,51 @@ configs.weights_path="/private/home/jathushan/3D/video_gmae/logs/gmae_large_imag
 
 
 
+# python chewbacca/train.py -m \
+# --config-name gmae.yaml \
+# hydra/launcher=submitit_slurm \
+# launcher=slurm_x \
+# model._target_="chewbacca.models.gmae.GMAELitModule" \
+# datamodule._target_="chewbacca.datamodules.image_datamodule.ImageDataModule" \
+# task_name=gmae_large_imagenet_test1_ft1 \
+# trainer=ddp_unused \
+# trainer.devices=8 \
+# trainer.num_nodes=4 \
+# configs.task="finetune" \
+# configs.model_name="vit_large_patch16" \
+# configs.input_size=224 \
+# configs.dataset_type="imagenet" \
+# configs.lr=1e-4,2e-4,4e-4 \
+# configs.weight_decay=0,0.2,0.02,0.002,0.0002 \
+# trainer.accumulate_grad_batches=1 \
+# configs.train_batch_size=64 \
+# configs.test_batch_size=64 \
+# configs.train_num_workers=8 \
+# configs.test_num_workers=8 \
+# trainer.gradient_clip_val=2.0 \
+# configs.warmup_steps=10 \
+# trainer.max_epochs=90 \
+# configs.num_classes=1000 \
+# configs.load_strict=False \
+# callbacks.model_checkpoint.every_n_epochs=10 \
+# configs.training_type="imagenet_vit_remove-probe-layers_full-finetuning" \
+# configs.vocab_size=256 \
+# configs.scale_factor=1.0 \
+# configs.scale_vocab=1 \
+# configs.mask_ratio=0.75 \
+# configs.solver="AdamW" \
+# configs.weights_path="/private/home/jathushan/3D/video_gmae/logs/gmae_large_imagenet_test1/0/checkpoints/last.ckpt" \
+
+
+
+
 python chewbacca/train.py -m \
 --config-name gmae.yaml \
 hydra/launcher=submitit_slurm \
 launcher=slurm_x \
 model._target_="chewbacca.models.gmae.GMAELitModule" \
 datamodule._target_="chewbacca.datamodules.image_datamodule.ImageDataModule" \
-task_name=gmae_large_imagenet_test1_ft1 \
+task_name=gmae_large_imagenet_test1_ft2 \
 trainer=ddp_unused \
 trainer.devices=8 \
 trainer.num_nodes=4 \
@@ -331,11 +369,11 @@ configs.task="finetune" \
 configs.model_name="vit_large_patch16" \
 configs.input_size=224 \
 configs.dataset_type="imagenet" \
-configs.lr=1e-4,2e-4,4e-4 \
-configs.weight_decay=0,0.2,0.02,0.002,0.0002 \
+configs.lr=1e-4,4e-4 \
+configs.weight_decay=5e-2,5e-4 \
 trainer.accumulate_grad_batches=1 \
-configs.train_batch_size=64 \
-configs.test_batch_size=64 \
+configs.train_batch_size=16 \
+configs.test_batch_size=16 \
 configs.train_num_workers=8 \
 configs.test_num_workers=8 \
 trainer.gradient_clip_val=2.0 \
@@ -349,7 +387,8 @@ configs.vocab_size=256 \
 configs.scale_factor=1.0 \
 configs.scale_vocab=1 \
 configs.mask_ratio=0.75 \
-configs.solver="AdamW" \
+configs.solver="AdamW-layer" \
+configs.layer_decay=0.95,0.9,0.85,0.8,0.6 \
 configs.weights_path="/private/home/jathushan/3D/video_gmae/logs/gmae_large_imagenet_test1/0/checkpoints/last.ckpt" \
 
 
