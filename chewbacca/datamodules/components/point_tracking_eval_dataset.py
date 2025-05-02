@@ -71,7 +71,7 @@ class PointTrackingEvalDataset(IterableDataset):
     def __init__(
         self,
         pickle_files,  # List[str]
-        cfg,
+        cfg
     ):
         super().__init__()
         self.cfg = cfg

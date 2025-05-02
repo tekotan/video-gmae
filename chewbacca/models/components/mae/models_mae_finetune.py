@@ -168,7 +168,6 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         self.num_decoder_queries = num_tracks
         self.batch_prediction = batch_prediction
         self.num_fourier_features = num_fourier_features
-        self.linear_cond = None
         self.zero_t_prediction = zero_t_prediction
         self.autoregressive = autoregressive
         self.quantize_output_bins = quantize_output_bins
@@ -179,11 +178,9 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         if self.mode == "point-tracking":
             self.params_per_out = self.input_frames * self.output_size
             self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
-            self.linear_cond = nn.Linear(self.cond_size, decoder_embed_dim)
         elif self.mode == "object-tracking":
             self.params_per_out = self.input_frames * self.output_size
             self.cond_size = self.num_fourier_features * self.output_size if self.num_fourier_features > 0 else self.output_size
-            self.linear_cond = nn.Linear(self.cond_size, decoder_embed_dim)
         else:
             self.input_frames = self.total_frames
 

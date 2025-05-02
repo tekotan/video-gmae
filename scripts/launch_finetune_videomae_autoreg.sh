@@ -3,7 +3,7 @@
 # --config-name gmae_ema.yaml \
 # model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 # datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-# task_name=vit_large_videomae_finetune_point_tracking_crossattn_v2 \
+# task_name=vit_large_mae_st_fullfinetune_point_tracking_crossattn_v1 \
 # trainer=ddp_unused \
 # trainer.devices=1 \
 # trainer.num_nodes=1 \
@@ -13,7 +13,7 @@
 # configs.lr=1e-4 \
 # configs.weight_decay=5e-2 \
 # trainer.accumulate_grad_batches=1 \
-# configs.train_batch_size=2 \
+# configs.train_batch_size=4 \
 # configs.test_batch_size=4 \
 # configs.train_num_workers=1 \
 # configs.test_num_workers=1 \
@@ -31,22 +31,12 @@
 # configs.training_type="train_ucf101_point-tracking_save-images_no-mask_random-frames" \
 # configs.load_strict=False \
 # configs.mask_ratio=0.0 \
-# configs.mae_st=False \
-# configs.videomae="large" \
-# configs.finetune_params.reuse_decoder=False \
+# configs.mae_st="large" \
+# configs.videomae=False \
 # configs.finetune_params.num_fourier_features=64 \
-# configs.finetune_params.batch_prediction=False \
 # configs.finetune_params.new_readout_mode=True \
-# configs.finetune_params.tracks_to_sample=4 \
-# configs.finetune_params.test=False \
-# configs.finetune_params.zero_t_prediction=False \
-# configs.finetune_params.autoregressive=False \
-# configs.finetune_params.quantized_prediction=False \
-# configs.finetune_params.dit_head=False \
-# configs.finetune_params.quantize_output_bins=500 \
-# configs.inference.testing=False \
-# configs.inference.context_length=1 \
-# configs.inference.save_predictions=False
+# configs.finetune_params.tracks_to_sample=8 \
+# configs.finetune_params.freeze_encoder=False
 
 
 # !/bin/bash
@@ -54,7 +44,7 @@ python chewbacca/validate.py -m \
 --config-name gmae_ema.yaml \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vit_large_videomae_finetune_point_tracking_crossattn_v2 \
+task_name=vit_large_mae_st_fullfinetune_point_tracking_crossattn_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -79,22 +69,15 @@ configs.dataset_type="video" \
 trainer.limit_train_batches=1000 \
 trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="eval_ucf101_point-tracking_save-images_no-mask_random-frames" \
+configs.training_type="eval-davis_ucf101_point-tracking_save-images_no-mask_random-frames" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \
 configs.finetune_params.reuse_decoder=False \
 configs.finetune_params.num_fourier_features=64 \
-configs.finetune_params.batch_prediction=False \
 configs.finetune_params.new_readout_mode=True \
 configs.finetune_params.tracks_to_sample=16 \
-configs.finetune_params.test=False \
-configs.finetune_params.zero_t_prediction=False \
-configs.finetune_params.autoregressive=False \
-configs.finetune_params.quantized_prediction=False \
-configs.finetune_params.dit_head=False \
-configs.mae_st=False \
-configs.videomae="large" \
-configs.finetune_params.quantize_output_bins=500 \
+configs.videomae=False \
+configs.mae_st="large" \
 configs.inference.testing=True \
 configs.inference.context_length=1 \
 configs.inference.save_predictions=True
