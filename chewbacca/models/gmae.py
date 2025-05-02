@@ -136,6 +136,7 @@ class GMAELitModule(LightningModule):
                                                                     pairwise_random_frames=self.cfg.pairwise_random_frames,
                                                                     videomae=self.cfg.videomae,
                                                                     mae_st=self.cfg.mae_st,
+                                                                    training_type=self.cfg.training_type,
                                                                 )
             
         
