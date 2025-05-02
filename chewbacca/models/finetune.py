@@ -720,7 +720,7 @@ class FinetuneLitModule(LightningModule):
                 pred_boxes_ = pred_boxes[i:i+1, :first_invalid_index] * self.cfg.input_size
                 # pred_visible_ = pred_visible[i:i+1, :first_invalid_index]
 
-                true_boxes_ = true_boxes[i:i+1, :first_invalid_index] * self.cfg.input_size
+                true_boxes_ = target_boxes[i:i+1, :first_invalid_index] * self.cfg.input_size
                 # true_visible_ = true_visible[i:i+1, :first_invalid_index]
 
                 # if set((1 - (~true_visible_).detach().cpu().numpy()).flatten().tolist()) == {0}:
