@@ -777,6 +777,66 @@ class GMAELitModule(LightningModule):
         log.info(stats)
 
 
+
+    def get_param_groups(self):
+        
+        def _get_layer_decay(name):
+            layer_id = None
+            depth = len(self.encoder.blocks)
+            if "class_token" in name or "pos_embed" in name or "patch_embed.proj" in name:
+                layer_id = 0
+            elif ("_head" in name):
+                layer_id = depth + 1
+            elif ".blocks." in name:
+                layer_id = int(name.split(".blocks.")[1].split(".")[0]) + 1
+            else:
+                layer_id = depth + 1
+            layer_decay = self.cfg.layer_decay ** (depth + 1 - layer_id)
+            return layer_id, layer_decay
+
+        non_bn_parameters_count = 0
+        zero_parameters_count = 0
+        no_grad_parameters_count = 0
+        parameter_group_names = {}
+        parameter_group_vars = {}
+
+        for name, p in self.named_parameters():
+            print(name)
+            if not p.requires_grad:
+                group_name = "no_grad"
+                no_grad_parameters_count += 1
+                continue
+            name = name[len("module."):] if name.startswith("module.") else name
+            if ((len(p.shape) == 1 or name.endswith(".bias")) and self.cfg.ZERO_WD_1D_PARAM):
+                layer_id, layer_decay = _get_layer_decay(name)
+                group_name = "layer_%d_%s" % (layer_id, "zero")
+                weight_decay = 0.0
+                zero_parameters_count += 1
+            else:
+                layer_id, layer_decay = _get_layer_decay(name)
+                group_name = "layer_%d_%s" % (layer_id, "non_bn")
+                weight_decay = self.cfg.weight_decay
+                non_bn_parameters_count += 1
+
+            if group_name not in parameter_group_names:
+                parameter_group_names[group_name] = {
+                    "weight_decay": weight_decay,
+                    "params": [],
+                    "lr": self.cfg.lr * self.lr_scaler * layer_decay,
+                }
+                parameter_group_vars[group_name] = {
+                    "weight_decay": weight_decay,
+                    "params": [],
+                    "lr": self.cfg.lr * self.lr_scaler * layer_decay,
+                }
+            parameter_group_names[group_name]["params"].append(name)
+            parameter_group_vars[group_name]["params"].append(p)
+        
+        import json
+        print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
+        optim_params = list(parameter_group_vars.values())
+        return optim_params
+
     def configure_optimizers(self):
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
         Normally you'd need one. But in the case of GANs or similar you might have multiple.
@@ -796,7 +856,10 @@ class GMAELitModule(LightningModule):
         log.info("Linear LR scaling factor: {}".format(self.lr_scaler))
         log.info(f"Total number of trainable parameters : {sum(p.numel() / 1024 / 1024 for p in self.trainer.model.parameters() if p.requires_grad):.6f} million")
 
-        optim_params = [{'params': filter(lambda p: p.requires_grad, self.trainer.model.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
+        if(self.cfg.layer_decay is not None):
+            optim_params = self.get_param_groups()
+        else:
+            optim_params = [{'params': filter(lambda p: p.requires_grad, self.trainer.model.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
 
         if(self.cfg.solver=="LARS"):
             optim_params = [{'params': filter(lambda p: p.requires_grad, self.linear_layer.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
@@ -805,6 +868,9 @@ class GMAELitModule(LightningModule):
             optim_params = [{'params': filter(lambda p: p.requires_grad, self.linear_layer.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
             optimizer = Lamb(params=optim_params, weight_decay=self.cfg.weight_decay)
         elif(self.cfg.solver=="AdamW"):
+            optim_params = add_weight_decay(self.trainer.model, self.cfg.weight_decay)
+            optimizer = optim.AdamW(params=optim_params, lr=self.cfg.lr * self.lr_scaler, betas=(0.9, 0.95))
+        elif(self.cfg.solver=="AdamW-layer"):
             optim_params = add_weight_decay(self.trainer.model, self.cfg.weight_decay)
             optimizer = optim.AdamW(params=optim_params, lr=self.cfg.lr * self.lr_scaler, betas=(0.9, 0.95))
         else:
