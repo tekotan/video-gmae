@@ -236,13 +236,6 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             # ids_restore = torch.arange(x.shape[1]).unsqueeze(0).repeat(x.shape[0], 1).to(x.device)
             return x, mask, ids_restore, latents
         elif self.mae_st:
-            # mae_st takes normalized pixels in [0,1] interval
-
-            imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=x.device).to(dtype=x.dtype)
-            imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=x.device).to(dtype=x.dtype)
-
-            x = (x * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
-
             x = self.mae_st_model.patch_embed(x)
             N, T, L, C = x.shape
             x = x.view([N, T * L, C])

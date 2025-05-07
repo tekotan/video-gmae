@@ -3,14 +3,14 @@
 # --config-name gmae_ema.yaml \
 # model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 # datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-# task_name=vit_large_mae_st_fullfinetune_point_tracking_crossattn_v1 \
+# task_name=vit_large_mae_st_fullfinetune_point_tracking_crossattn_v2 \
 # trainer=ddp_unused \
 # trainer.devices=1 \
 # trainer.num_nodes=1 \
 # configs.task="finetune" \
 # configs.model_name="finetune_vit_large_patch16" \
 # configs.input_size=224 \
-# configs.lr=1e-4 \
+# configs.lr=5e-5 \
 # configs.weight_decay=5e-2 \
 # trainer.accumulate_grad_batches=1 \
 # configs.train_batch_size=4 \
@@ -44,7 +44,7 @@ python chewbacca/validate.py -m \
 --config-name gmae_ema.yaml \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vit_large_mae_st_fullfinetune_point_tracking_crossattn_v1 \
+task_name=vit_large_mae_st_fullfinetune_point_tracking_crossattn_v2 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \

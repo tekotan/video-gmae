@@ -641,6 +641,8 @@ class MaskedAutoencoderViT(nn.Module):
                 # quats_delta = quats[i][j*limit_gaussian:(j+1)*limit_gaussian]
                 if self.mean_deltas:
                     means_ = means_ + means_delta
+                else:
+                    means_ = means[i][j*limit_gaussian:(j+1)*limit_gaussian].unsqueeze(0)
                 # scales_ = scales_ + scales_delta
                 # quats_ = quats_ + quats_delta
                 radii, xys, depths, conics, compensations = fully_fused_projection(means_, None, quats_, scales_, viewmat, self.Ks, self.W, self.H)
@@ -654,6 +656,7 @@ class MaskedAutoencoderViT(nn.Module):
                         rgbs_ = rgbs[i][:limit_gaussian].unsqueeze(0) + rgbs_delta
                         rgbs_ = torch.sigmoid(rgbs_)
                 else:
+                    rgbs_ = rgbs[i][j*limit_gaussian:(j+1)*limit_gaussian].unsqueeze(0)
                     rgbs_ = torch.sigmoid(rgbs_)
                 
                 # opacities_ = opacities[i][j*limit_gaussian:(j+1)*limit_gaussian]
