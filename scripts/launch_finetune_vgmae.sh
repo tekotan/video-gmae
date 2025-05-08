@@ -3,7 +3,7 @@ python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vgmae_base_seq16_finetune_point_v1 \
+task_name=vgmae_base_seq16_fullfinetune_point_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -21,7 +21,7 @@ trainer.gradient_clip_val=2.0 \
 configs.scheduler="cosine_step" \
 configs.lr_interval="step" \
 configs.warmup_steps=20 \
-trainer.max_epochs=200 \
+trainer.max_epochs=50 \
 configs.seq_length=16 \
 configs.num_classes=400 \
 configs.dataset_type="video" \
@@ -34,7 +34,7 @@ configs.load_strict=False \
 configs.mask_ratio=0.0 \
 configs.finetune_params.num_fourier_features=64 \
 configs.finetune_params.new_readout_mode=True \
-configs.finetune_params.freeze_encoder=True \
+configs.finetune_params.freeze_encoder=False \
 configs.finetune_params.tracks_to_sample=8
 
 # # !/bin/bash
@@ -42,12 +42,12 @@ configs.finetune_params.tracks_to_sample=8
 # --config-name gmae_ema.yaml \
 # model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 # datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-# task_name=vgmae_large_seq16_fullfinetune_point_v1 \
+# task_name=vgmae_base_seq16_finetune_point_v1 \
 # trainer=ddp_unused \
 # trainer.devices=1 \
 # trainer.num_nodes=1 \
 # configs.task="finetune" \
-# configs.model_name="finetune_vit_large_patch16" \
+# configs.model_name="finetune_vit_base_patch16" \
 # configs.input_size=224 \
 # configs.lr=1e-4 \
 # configs.weight_decay=5e-2 \
