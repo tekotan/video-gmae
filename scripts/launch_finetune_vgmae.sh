@@ -1,6 +1,8 @@
 # !/bin/bash
 python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
+hydra/launcher=submitit_slurm \
+launcher=slurm_em \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
 task_name=vgmae_base_seq16_fullfinetune_point_v1 \
@@ -29,7 +31,7 @@ trainer.limit_train_batches=1000 \
 trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
 configs.training_type="train_ucf101_point-tracking_save-images_no-mask_interpolate-pos-emb" \
-configs.weights_path="./logs2/vgmae_base_k400_test1/3/checkpoints/last.ckpt" \
+configs.weights_path="/home/jathu/gmae_logs/vgmae_large_k400_test4/0/checkpoints/last.ckpt" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \
 configs.finetune_params.num_fourier_features=64 \

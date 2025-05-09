@@ -53,9 +53,15 @@ class CrossAttentionReadout(nn.Module):
         fourier_dim = self.num_fourier_features * cond_size  # 3 for xyz coords, *2 for sin/cos
         self.fourier_embedding = nn.Linear(fourier_dim, 512)
         self.query_mlp = nn.Sequential(
-            nn.Linear(512, 512),
-            nn.GELU(),
+            # nn.Linear(512, 512),
+            # nn.GELU(),
             nn.Linear(512, embed_dim)
+        )
+
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.GELU(),
+            nn.Linear(embed_dim * 4, embed_dim)
         )
 
         # Output projection
@@ -306,6 +312,8 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         queries = self.readout.norm1(queries)
         attn_output, _ = self.readout.cross_attn(queries, x, x)
         queries = queries + attn_output
+
+        queries = self.readout.mlp(queries)
 
         outputs = self.readout.output_proj(queries)
         outputs = outputs.view(batch_size, -1, self.input_frames, self.output_size)
