@@ -83,12 +83,12 @@ class FinetuneDataModule(LightningDataModule):
                     # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0008_of_0010.pkl",
                     # "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/0009_of_0010.pkl",
                 ]
-                self.data_train = PointTrackingEvalDataset(pickle_files, self.hparams.cfg)
                 self.data_val = PointTrackingEvalDataset(pickle_files, self.hparams.cfg)
+                self.data_train = self.data_val
             elif "eval-kinetics" in self.hparams.cfg.training_type:
                 from chewbacca.datamodules.components.point_tracking_eval_dataset import PointTrackingEvalDataset
                 pickle_files = [
-                    "/home/tekotan/Chewbacca_test/data-download/tapvid_kinetics/kinetics_10percent_sample.pkl"
+                    "/home/ubuntu/Chewbacca_test/data-download/tapvid_kinetics/kinetics_10percent_sample.pkl"
                 ]
                 self.data_val = PointTrackingEvalDataset(pickle_files, self.hparams.cfg)
                 self.data_train = self.data_val
