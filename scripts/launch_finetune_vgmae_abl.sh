@@ -9,7 +9,7 @@ trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="finetune" \
-configs.model_name="finetune_vit_large_patch16" \
+configs.model_name="finetune_vit_base_patch16" \
 configs.input_size=224 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
@@ -48,7 +48,7 @@ trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="finetune" \
-configs.model_name="finetune_vit_large_patch16" \
+configs.model_name="finetune_vit_base_patch16" \
 configs.input_size=224 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
@@ -87,7 +87,7 @@ trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="finetune" \
-configs.model_name="finetune_vit_large_patch16" \
+configs.model_name="finetune_vit_base_patch16" \
 configs.input_size=224 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
@@ -121,7 +121,7 @@ python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vgmae_base_seq8_mFrT_finetune_point_v1 \
+task_name=vgmae_large_seq8_mFrT_finetune_point_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -160,7 +160,7 @@ python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vgmae_base_seq8_mTrF_finetune_point_v1 \
+task_name=vgmae_large_seq8_mTrF_finetune_point_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -199,7 +199,7 @@ python chewbacca/train.py -m \
 --config-name gmae_ema.yaml \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vgmae_base_seq8_mFrF_finetune_point_v1 \
+task_name=vgmae_large_seq8_mFrF_finetune_point_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \

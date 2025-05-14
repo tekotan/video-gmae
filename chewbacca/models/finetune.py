@@ -248,6 +248,108 @@ def compute_tapvid_metrics(
     )
     return metrics
 
+def compute_tapvid_metrics_length_scaled(
+    query_points,
+    gt_occluded,
+    gt_tracks,
+    pred_occluded,
+    pred_tracks,
+    query_mode="first",
+):
+    """
+    Same signature & original keys as TAP-Vid v1, but also returns
+    *_per_frame metrics that are length-agnostic.
+    """
+    assert gt_occluded.shape == pred_occluded.shape
+    B, N, T = gt_occluded.shape  # batch, queries, frames
+    metrics = {}
+
+    # -----------------------------------------------------------
+    # ❶  Build the evaluation mask (identical to original code)
+    one_hot_eye = np.eye(T)
+    query_frame = np.round(query_points[..., 0]).astype(np.int32)
+    evaluation_points = one_hot_eye[query_frame] == 0
+
+    if query_mode == "first":
+        assert B == 1, "Batch size must be 1 in 'first' mode."
+        for i in range(N):
+            first_vis = np.where(gt_occluded[0, i] == 0)[0]
+            stop = first_vis[0] if len(first_vis) else T
+            evaluation_points[0, i, :stop] = False
+    elif query_mode != "strided":
+        raise ValueError(f"Unknown query_mode {query_mode}")
+
+    # -----------------------------------------------------------
+    # ❷  Occlusion accuracy (per-sequence)
+    correct_occ = np.equal(pred_occluded, gt_occluded) & evaluation_points
+    occ_acc = np.sum(correct_occ, axis=(1, 2)) / np.sum(evaluation_points, axis=(1, 2))
+    metrics["occlusion_accuracy"] = occ_acc
+
+    # (keep TP / FP / FN counts unchanged)
+    metrics["occ_tp"] = np.sum(correct_occ & gt_occluded, axis=(1, 2))
+    metrics["occ_fp"] = np.sum(~correct_occ & pred_occluded, axis=(1, 2))
+    metrics["occ_fn"] = np.sum(~correct_occ & (~pred_occluded), axis=(1, 2))
+
+    # -----------------------------------------------------------
+    # ❸  Geometric errors
+    visible      = ~gt_occluded
+    pred_visible = ~pred_occluded
+    L2_error     = np.linalg.norm(pred_tracks - gt_tracks, axis=-1)
+
+    avg_distance = (L2_error * visible).sum() / visible.sum()
+    metrics["avg_distance"]    = np.array([avg_distance])
+
+    # -----------------------------------------------------------
+    # ❹  IoU / Pts-within-threshold, per-sequence first
+    all_frac_within, all_jaccard = [], []
+
+    for thresh in [1, 2, 4, 8, 16]:
+        within_dist = np.sum((pred_tracks - gt_tracks) ** 2, axis=-1) < thresh ** 2
+        is_correct  = within_dist & visible
+
+        n_visible = np.sum(visible & evaluation_points, axis=(1, 2))
+        n_tp      = np.sum(is_correct & evaluation_points, axis=(1, 2))
+        frac_corr = n_tp / n_visible
+
+        metrics[f"pts_within_{thresh}"]      = frac_corr
+        metrics["num_visible"]               = n_visible
+        metrics[f"num_pts_within_{thresh}"]  = n_tp
+        all_frac_within.append(frac_corr)
+
+        # Jaccard
+        true_pos = np.sum(is_correct & pred_visible & evaluation_points, axis=(1, 2))
+        false_pos = np.sum(
+            ((~visible) | (~within_dist)) & pred_visible & evaluation_points, axis=(1, 2)
+        )
+        jaccard = true_pos / (n_visible + false_pos)
+        metrics[f"jaccard_{thresh}"] = jaccard
+        all_jaccard.append(jaccard)
+
+    # Averages (sequence-normalised)
+    metrics["average_jaccard"] = np.mean(np.stack(all_jaccard, axis=1), axis=1)
+    metrics["average_pts_within_thresh"] = np.mean(
+        np.stack(all_frac_within, axis=1), axis=1
+    )
+
+    # -----------------------------------------------------------
+    # ❺  Per-frame scaling for fair length comparison
+    L = T  # or use an array if videos have different lengths
+    for thresh in [1, 2, 4, 8, 16]:
+        j_key  = f"jaccard_{thresh}"
+        p_key  = f"pts_within_{thresh}"
+        metrics[f"{j_key}_per_frame"] = 1.0 - np.power(1.0 - metrics[j_key], 1.0 / L)
+        metrics[f"{p_key}_per_frame"] = 1.0 - np.power(1.0 - metrics[p_key], 1.0 / L)
+
+    metrics["average_jaccard_per_frame"] = np.mean(
+        np.stack([metrics[f"jaccard_{t}_per_frame"] for t in [1, 2, 4, 8, 16]], axis=1),
+        axis=1,
+    )
+    metrics["average_pts_within_thresh_per_frame"] = np.mean(
+        np.stack([metrics[f"pts_within_{t}_per_frame"] for t in [1, 2, 4, 8, 16]], axis=1),
+        axis=1,
+    )
+    return metrics
+
 
 
 class FinetuneLitModule(LightningModule):
@@ -484,7 +586,11 @@ class FinetuneLitModule(LightningModule):
                     x_points, occlusions_pred = self.encoder.forward_decoder(latent, ids_restore, init_queries) # B x 256 x T x 2
                     
                     if self.cfg.inference.save_predictions:
-                        data = (init_queries, x_points, occlusions_pred, finetune_target, occluded_points)
+                        imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=video.device).to(dtype=video.dtype)
+                        imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=video.device).to(dtype=video.dtype)
+                        imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
+                        imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
+                        data = {"video": imgs, "init_queries": init_queries, "points_pred": x_points, "occlusions_pred": occlusions_pred, "points_gt": finetune_target, "occlusions_gt": occluded_points}
                         torch.save(data, f"{self.cfg.storage_folder}/tests/eval_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
 
                     final_image_ = self.visualize_point_tracking(video, x_points, init_queries, finetune_target, occluded_points, occlusions_pred)

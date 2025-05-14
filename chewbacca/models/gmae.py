@@ -137,6 +137,7 @@ class GMAELitModule(LightningModule):
                                                                     videomae=self.cfg.videomae,
                                                                     mae_st=self.cfg.mae_st,
                                                                     training_type=self.cfg.training_type,
+                                                                    freeze_encoder=self.cfg.finetune_params.freeze_encoder,
                                                                 )
             
         
@@ -458,8 +459,8 @@ class GMAELitModule(LightningModule):
 
 
                 # save the masked images and reconstructed images
-                # if "save-images" in self.cfg.training_type and batch_idx<1 and not self.training and (self.current_epoch+1)%10==0:
-                if "save-images" in self.cfg.training_type and batch_idx<1:
+                # if "save-images" in self.cfg.training_type and batch_idx<1 or (not self.training and (self.current_epoch+1)%10==0):
+                if "save-images" in self.cfg.training_type and batch_idx<1 or (self.cfg.inference.testing):
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                     # renormalize to 0,1
@@ -476,7 +477,8 @@ class GMAELitModule(LightningModule):
                                 
                             for j in [32,64,128,256,512,-1]:
                                 if not self.cfg.random_frames:
-                                    pred_ = self.encoder.forward_render(x_points, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences)
+                                    pred_, primitives = self.encoder.forward_render(x_points, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences, return_primitives=True)
+                                    primitives["video"] = imgs
                                 else:
                                     pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences, camera_jitter=self.cfg.camera_jitter)
                                 preds_all.append(pred_)
@@ -486,11 +488,10 @@ class GMAELitModule(LightningModule):
                             TMP_ = preds_2[:, :, i].permute(1, 2, 0, 3, 4).reshape(preds_2.shape[1], preds_2.shape[3], preds_2.shape[0]*preds_2.shape[4], 3)
                             TMP_ = (TMP_.detach().cpu().numpy() * 255).astype(np.uint8)
                             pred_ab.append(TMP_)
-
                     final_image_ = []
                     for i in range(len(pred_ab)):
                         final_image = np.concatenate([imgs[:, i], pred_ab[i]], axis=2).reshape(-1, (imgs[:, 0].shape[2]+pred_ab[0].shape[2]), 3)
-                        if "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type:
+                        if "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type or "kinetics" in self.cfg.training_type:
                             final_image_.append(final_image)
                         else:
                             final_image_.append(final_image[:, :, ::-1])
@@ -503,8 +504,10 @@ class GMAELitModule(LightningModule):
                         # make video with final_image_a, final_image_b using moviepy
                         clip = ImageSequenceClip(final_image_, fps=1)  # fps can be adjusted to your need
                         clip.write_videofile(f"{self.cfg.storage_folder}/results/{train_}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
-                    
                     if self.cfg.inference.testing:
+                        if "save-gaussians" in self.cfg.training_type:
+                            torch.save(primitives, self.cfg.storage_folder + f"/tests/{self.current_epoch}_{batch_idx}_gaussians.pt")
+
                         title = "depth" if self.cfg.inference.depth else "corr" if  self.cfg.inference.correspondences else "test"
                         clip = ImageSequenceClip(final_image_, fps=1)  # fps can be adjusted to your need
                         clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')

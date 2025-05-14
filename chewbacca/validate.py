@@ -92,9 +92,42 @@ def validate(cfg: DictConfig) -> Tuple[dict, dict]:
             checkpoint_path = path_tmp
             log.info("Loading weights from last ckpt " + checkpoint_path)
         else:
-            if cfg.configs.weights_path is not None and os.path.exists(cfg.configs.weights_path):
-                checkpoint_path = cfg.configs.weights_path
-                log.info("Loading weights from specified weights path " + checkpoint_path)
+            if(cfg.configs.weights_path is not None):
+
+                if os.path.exists(cfg.configs.weights_path):
+
+                    try:
+                        av = torch.load(cfg.configs.weights_path, map_location=torch.device('cpu'))['state_dict']
+                    except:
+                        try:
+                            av = torch.load(cfg.configs.weights_path, map_location=torch.device('cpu'))['model']
+                            av = {"encoder."+k: v for k, v in av.items()}
+                        except:
+                            av = torch.load(cfg.configs.weights_path, map_location=torch.device('cpu'))
+                            av = {k.replace("_forward_module.", ""): v for k, v in av.items()}
+
+                    # if loading from torch.compile model
+                    if(not cfg.configs.use_torch_compile):
+                        av = {k.replace("._orig_mod", ""): v for k, v in av.items()}
+
+                    if "remove-_forward" in cfg.configs.training_type:
+                        av = {k.replace("_forward_module.", ""): v for k, v in av.items()}
+
+                    if "remove-probe-layers" in cfg.configs.training_type:
+                        av = {k: v for k, v in av.items() if "linear_layer" not in k}
+                    if "interpolate-pos-emb" in cfg.configs.training_type:
+                        from chewbacca.models.components.mae.models_mae_video import interpolate_pos_embed, interpolate_pos_embed2
+                        if "encoder.decoder_pos_embed" in av:
+                            a1 = av['encoder.decoder_pos_embed']
+                            a2 = torch.randn_like(model.encoder.decoder_pos_embed)
+                            a2[:, :a1.shape[1], :] = a1
+                            av['encoder.decoder_pos_embed'] = a2
+
+
+                    out = model.load_state_dict(av, strict=cfg.configs.load_strict)
+                    log.info(out)
+                    log.info("Loading weights from weights " + cfg.configs.weights_path)
+
             else:
                 log.error("No valid checkpoint found for validation!")
                 return {}, object_dict

@@ -162,7 +162,7 @@ class MaskedAutoencoderViT(nn.Module):
                  number_of_frames=2, scale_factor=1.0, scale_vocab=1.0,
                  deltas_reg_weight=0.0, random_frames=False, mean_deltas=False, rgb_deltas=False,
                  rgb_deltas_scale=1, upsample_gaussians=None, spawning=False, frame_zero=False,
-                 pairwise_random_frames=False, videomae=False, training_type=None, mae_st=False):
+                 pairwise_random_frames=False, videomae=False, training_type=None, mae_st=False, freeze_encoder=False):
         super().__init__()
         # --------------------------------------------------------------------------
         # V1 Upgrades
@@ -196,8 +196,12 @@ class MaskedAutoencoderViT(nn.Module):
         self.scale_vocab = int(scale_vocab)
         if self.videomae == "large":
             self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-large")
+            for name, param in self.videomae_model.named_parameters():
+                param.requires_grad = not freeze_encoder
         elif self.videomae == "base":
             self.videomae_model = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base")
+            for name, param in self.videomae_model.named_parameters():
+                param.requires_grad = not freeze_encoder
         elif self.mae_st == "large":
             self.mae_st_model = mae_st_vit_large_patch16(num_frames=16, t_patch_size=2)
             checkpoint = torch.load("./logs/checkpoints/mae_pretrain_vit_large_k400.pth", map_location="cpu")
@@ -210,15 +214,21 @@ class MaskedAutoencoderViT(nn.Module):
                 ):
                     print(f"Removing key {k} from pretrained checkpoint")
                     del checkpoint_model[k]
-            
+
             msg = self.mae_st_model.load_state_dict(checkpoint_model, strict=False)
+            for name, param in self.mae_st_model.named_parameters():
+                param.requires_grad = not freeze_encoder
+
         else:
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.input_frames, embed_dim), requires_grad=False)  # fixed sin-cos embedding
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches*self.total_frames, embed_dim), requires_grad=False)
 
             self.blocks = nn.ModuleList([
                     Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
                     for i in range(depth)])
+
+            for name, param in self.blocks.named_parameters():
+                param.requires_grad = not freeze_encoder 
 
         self.norm = norm_layer(embed_dim)
         self.num_layers = depth
@@ -527,7 +537,7 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             x_points = self.decoder_step(x_, mask_tokens, frame_token=None)
 
-        if self.scale_vocab > 1:
+        if self.scale_vocab > 1 or len(self.upsample_gaussians) > 0:
             reshape_frames = self.number_of_frames
             x_points = x_points.reshape(x_points.shape[0], reshape_frames, self.num_points * np.prod(self.upsample_gaussians), self.scale_vocab, 14)
             x_points = x_points.permute(0, 1, 3, 2, 4)
@@ -536,7 +546,8 @@ class MaskedAutoencoderViT(nn.Module):
             return x_points, random_frame
         return x_points
     
-    def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, select_range_z=-1, return_deltas=False, return_corres=False, camera_jitter=False):
+    def forward_render(self, x_points, limit_gaussian=-1, limit_gaussian_z=-1, return_gaussians=False, return_depth=False, 
+                            select_range_z=-1, return_deltas=False, return_corres=False, camera_jitter=False, return_primitives=False):
         if limit_gaussian > 0:
             limit_gaussian = min(limit_gaussian, int(self.num_points * self.scale_vocab * np.prod(self.upsample_gaussians)))
         else:
@@ -562,6 +573,21 @@ class MaskedAutoencoderViT(nn.Module):
 
         rgbs = x_points[:, :, 10:13]
         opacities = x_points[:, :, 13:14]
+        if return_primitives:
+            initial_means = means.view(means.shape[0], -1, 3)[:, :limit_gaussian]
+            initial_scales = scales.view(scales.shape[0], -1, 3)[:, :limit_gaussian]
+            initial_quats = quats.view(quats.shape[0], -1, 4)[:, :limit_gaussian]
+            initial_rgbs = rgbs.view(rgbs.shape[0], -1, 3)[:, :limit_gaussian]
+            initial_opacities = opacities.view(opacities.shape[0], -1, 1)[:, :limit_gaussian]
+
+            delta_means = means.view(means.shape[0], -1, 3)[:, limit_gaussian:]
+            delta_rgbs = rgbs.view(rgbs.shape[0], -1, 3)[:, limit_gaussian:]
+
+            primitives = {
+                "x_points": x_points,
+                "viewmat": self.viewmat,
+                "Ks": self.Ks
+            }
         if camera_jitter:
             viewmat = self.viewmat.clone().to(dtype=dtype).to(device=device)
             random_r = torch.rand(())
@@ -695,7 +721,8 @@ class MaskedAutoencoderViT(nn.Module):
             scales_delta = scales[i].contiguous().view(-1, 3)[limit_gaussian:]
             quats_delta = quats[i].contiguous().view(-1, 4)[limit_gaussian:]
             return imgs_, (mean_deltas, scales_delta, quats_delta)
-
+        if return_primitives:
+            return imgs_, primitives
         return imgs_
         
     def forward_render_all_frames(self, x, ids_restore, limit_gaussian=-1, limit_gaussian_z=-1, return_depth=False, return_corres=False, camera_jitter=False):

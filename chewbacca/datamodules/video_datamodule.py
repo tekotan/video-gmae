@@ -96,6 +96,12 @@ class VideoDataModule(LightningDataModule):
             video_paths_val = np.load("data/kinetics_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
             self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+        elif "testdata" in self.hparams.cfg.training_type:
+            from chewbacca.datamodules.components.video_dataset import VideoDataset
+            video_paths_train = np.load("data/test_data_label.npy")
+            video_paths_val = np.load("data/test_data_label.npy")
+            self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
+            self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
 
         elif "cater" in self.hparams.cfg.training_type:
             video_paths_train = np.load("data/cater_train_label.npy")

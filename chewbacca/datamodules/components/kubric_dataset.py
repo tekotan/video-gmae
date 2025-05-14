@@ -26,7 +26,7 @@ from tensorflow_graphics.geometry.transformation import rotation_matrix_3d
 from torch.utils.data import IterableDataset
 import torch
 
-tf.config.set_visible_devices([], 'GPU')
+# tf.config.set_visible_devices([], 'GPU')
 from tensorflow.python.framework.ops import disable_eager_execution
 disable_eager_execution()
 
@@ -1061,7 +1061,7 @@ class KubricPointTrackingDataset(IterableDataset):
         self.train = train
 
         # 1) Call your TF data pipeline here:
-        with tf.device('/CPU:0'):
+        with tf.device('/GPU:0'):
           self.tf_dataset = create_point_tracking_dataset(
               train_size=(self.cfg.input_size, self.cfg.input_size),
               shuffle_buffer_size=1024,

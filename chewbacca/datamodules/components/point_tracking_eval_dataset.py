@@ -5,6 +5,8 @@ import torchvision.transforms as transforms
 
 import numpy as np
 import os
+from skimage.transform import resize
+from tqdm import tqdm
 
 def random_crop_4d(
     frames_4d: torch.Tensor,
@@ -66,6 +68,26 @@ def random_crop_4d(
 
     return cropped_frames, adjusted_points, adjusted_occlusions
 
+def resize_video(frames_np, min_size):
+    """
+    Resize video frames so the smaller dimension matches min_size,
+    preserving aspect ratio.
+
+    Args:
+        frames_np:  Numpy array of shape (T, H, W, 3)
+        min_size:   Desired minimum dimension
+    Returns:
+        Resized frames as a numpy array.
+    """
+    T, H, W, C = frames_np.shape
+    scale = min_size / min(H, W)
+    new_H = int(round(H * scale))
+    new_W = int(round(W * scale))
+    resized_frames = np.zeros((T, new_H, new_W, C), dtype=np.float32)
+
+    for i in range(T):
+        resized_frames[i] = resize(frames_np[i], (new_H, new_W), anti_aliasing=True)
+    return resized_frames
 
 class PointTrackingEvalDataset(IterableDataset):
     def __init__(
@@ -78,6 +100,7 @@ class PointTrackingEvalDataset(IterableDataset):
         self.bin_size = min(24, self.cfg.seq_length)
         self.all_items = []
 
+        nearest_power_of_two = 2 ** int(np.ceil(np.log2(self.cfg.input_size)))
         for pkl_file in pickle_files:
             if not os.path.isfile(pkl_file):
                 raise FileNotFoundError(f"Pickle file not found: {pkl_file}")
@@ -88,10 +111,16 @@ class PointTrackingEvalDataset(IterableDataset):
             if isinstance(data, dict):
                 # DAVIS-like => {video_name: content_dict, ...}
                 for video_name, content in data.items():
+                    resized_video = resize_video(content["video"], nearest_power_of_two)
+                    del content["video"]
+                    content["video"] = resized_video
                     self.all_items.append((video_name, content))
             elif isinstance(data, list):
                 # RGB-Stacking => [ content_dict, ... ]
-                for content in data:
+                for content in tqdm(data):
+                    resized_video = resize_video(content["video"], nearest_power_of_two)
+                    del content["video"]
+                    content["video"] = resized_video
                     self.all_items.append((None, content))
             else:
                 raise ValueError(
@@ -118,7 +147,6 @@ class PointTrackingEvalDataset(IterableDataset):
             W = frames_np.shape[2]
 
             # 2) Convert frames to float [0..1] and normalize
-            frames_np = frames_np / 255.0
             mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
             std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
             frames_np = (frames_np - mean) / std

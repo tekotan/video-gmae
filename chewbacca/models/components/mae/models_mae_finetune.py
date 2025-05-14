@@ -53,16 +53,16 @@ class CrossAttentionReadout(nn.Module):
         fourier_dim = self.num_fourier_features * cond_size  # 3 for xyz coords, *2 for sin/cos
         self.fourier_embedding = nn.Linear(fourier_dim, 512)
         self.query_mlp = nn.Sequential(
-            # nn.Linear(512, 512),
-            # nn.GELU(),
+            nn.Linear(512, 512),
+            nn.GELU(),
             nn.Linear(512, embed_dim)
         )
 
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
-            nn.GELU(),
-            nn.Linear(embed_dim * 4, embed_dim)
-        )
+        # self.mlp = nn.Sequential(
+        #     nn.Linear(embed_dim, embed_dim * 4),
+        #     nn.GELU(),
+        #     nn.Linear(embed_dim * 4, embed_dim)
+        # )
 
         # Output projection
         self.output_proj = nn.Linear(embed_dim, output_size) # x,y,visibility
@@ -94,7 +94,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         self.videomae = videomae
         self.training_type = training_type
         self.mae_st = mae_st
-        
+
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
         self.patch_embed.requires_grad = not freeze_encoder
@@ -119,7 +119,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
                 ):
                     print(f"Removing key {k} from pretrained checkpoint")
                     del checkpoint_model[k]
-            
+
             msg = self.mae_st_model.load_state_dict(checkpoint_model, strict=False)
             for name, param in self.mae_st_model.named_parameters():
                 param.requires_grad = not freeze_encoder
@@ -153,7 +153,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
             self.cond_size = 3
             self.output_size = 3
             self.input_frames = min(24, self.total_frames)
-        
+
         if self.videomae or self.mae_st:
             self.input_frames = 16
 
@@ -179,7 +179,6 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         self.quantize_output_bins = quantize_output_bins
         self.quantized_prediction = quantized_prediction
         self.dit_head = dit_head
-        
 
         if self.mode == "point-tracking":
             self.params_per_out = self.input_frames * self.output_size
@@ -222,7 +221,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
 
                 # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
                 torch.nn.init.normal_(self.cls_token, std=.02)
-                
+
         self.apply(self._init_weights)
 
     def forward_encoder(self, x, mask_ratio):
@@ -313,7 +312,7 @@ class FinetuneMaskedAutoencoderViT(MaskedAutoencoderViT):
         attn_output, _ = self.readout.cross_attn(queries, x, x)
         queries = queries + attn_output
 
-        queries = self.readout.mlp(queries)
+        # queries = self.readout.mlp(queries)
 
         outputs = self.readout.output_proj(queries)
         outputs = outputs.view(batch_size, -1, self.input_frames, self.output_size)
