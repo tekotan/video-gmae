@@ -262,6 +262,8 @@ configs:
     videomae: False
     mae_st: False
 
+    random_clip: True
+
     inference:
         testing: False
         depth: False

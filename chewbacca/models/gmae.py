@@ -460,7 +460,7 @@ class GMAELitModule(LightningModule):
 
                 # save the masked images and reconstructed images
                 # if "save-images" in self.cfg.training_type and batch_idx<1 or (not self.training and (self.current_epoch+1)%10==0):
-                if "save-images" in self.cfg.training_type and batch_idx<1 or (self.cfg.inference.testing):
+                if "save-images" in self.cfg.training_type and batch_idx<1 or self.cfg.inference.testing:
                     if "no-mask" in self.cfg.training_type:
                         latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
                     # renormalize to 0,1
@@ -479,6 +479,7 @@ class GMAELitModule(LightningModule):
                                 if not self.cfg.random_frames:
                                     pred_, primitives = self.encoder.forward_render(x_points, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences, return_primitives=True)
                                     primitives["video"] = imgs
+                                    primitives["renders"] = (pred_.detach().cpu().numpy() * 255).astype(np.uint8)
                                 else:
                                     pred_ = self.encoder.forward_render_all_frames(latent, ids_restore, limit_gaussian_z=j, return_depth=self.cfg.inference.depth, return_corres=self.cfg.inference.correspondences, camera_jitter=self.cfg.camera_jitter)
                                 preds_all.append(pred_)

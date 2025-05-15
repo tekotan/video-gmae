@@ -94,7 +94,7 @@ class VideoDataset(Dataset):
 
         frames = [i for i in range(num_frames)]
         if num_frames > self.cfg.seq_length * self.cfg.sample_rate:
-            start = np.random.randint(0, num_frames-self.cfg.seq_length * self.cfg.sample_rate)
+            start = np.random.randint(0, num_frames-self.cfg.seq_length * self.cfg.sample_rate) if self.cfg.random_clip else 0
             frames = frames[start:start + self.cfg.seq_length * self.cfg.sample_rate:self.cfg.sample_rate]
 
         # GET THE RGB FRAMES

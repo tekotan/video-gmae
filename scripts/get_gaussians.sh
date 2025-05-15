@@ -1,19 +1,21 @@
 #!/bin/bash
 python chewbacca/validate.py -m \
 --config-name gmae_ema.yaml \
+hydra/launcher=submitit_slurm \
+launcher=slurm_em \
 model._target_="chewbacca.models.gmae.GMAELitModule" \
 datamodule._target_="chewbacca.datamodules.video_datamodule.VideoDataModule" \
-task_name=vgmae_base_kinetics_gaussians_test \
+task_name=vgmae_large_kinetics_quali \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="pretrain" \
-configs.model_name="mae_vit_base_patch16" \
+configs.model_name="mae_vit_large_patch16" \
 configs.input_size=224 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
 trainer.accumulate_grad_batches=1 \
-configs.train_batch_size=2 \
+configs.train_batch_size=4 \
 configs.test_batch_size=4 \
 configs.train_num_workers=8 \
 configs.test_num_workers=8 \
@@ -26,13 +28,15 @@ configs.seq_length=16 \
 configs.rgb_deltas=True \
 configs.mean_deltas=True \
 configs.num_classes=400 \
+configs.random_clip=False \
 configs.load_strict=False \
 configs.dataset_type="video" \
-configs.weights_path="/home/jathu/gmae_logs/vgmae_base_k400_test1/3/checkpoints/last.ckpt" \
-trainer.limit_train_batches=10000 \
-trainer.limit_val_batches=1000 \
+configs.weights_path="/home/jathu/gmae_logs/vgmae_large_k400_test4/0/checkpoints/last.ckpt" \
+trainer.limit_train_batches=1000 \
+trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="testdata_gaussian_save-images-z_save-gaussians_no-mask_interpolate-pos-emb" \
+configs.training_type="kinetics_gaussian_save-images-z_save-gaussians_no-mask_interpolate-pos-emb" \
 configs.inference.testing=True \
 configs.inference.context_length=1 \
-configs.inference.save_predictions=True
+configs.inference.save_predictions=True \
+configs.inference.testing=True
