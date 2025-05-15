@@ -782,15 +782,15 @@ class FinetuneLitModule(LightningModule):
                     first_invalid_index = true_points.shape[1]
                 else:
                     first_invalid_index = first_invalid_index[0]
-
+                first_n_frames = 5 # for GMRW comparision, otherwise -1
                 query_points_ = query_points[i:i+1, :first_invalid_index]
                 query_points_[:, :, 1:] *= self.cfg.input_size
 
-                pred_points_ = pred_points[i:i+1, :first_invalid_index] * self.cfg.input_size
-                pred_visible_ = pred_visible[i:i+1, :first_invalid_index]
+                pred_points_ = pred_points[i:i+1, :first_invalid_index, :first_n_frames] * self.cfg.input_size
+                pred_visible_ = pred_visible[i:i+1, :first_invalid_index, :first_n_frames]
 
-                true_points_ = true_points[i:i+1, :first_invalid_index] * self.cfg.input_size
-                true_visible_ = true_visible[i:i+1, :first_invalid_index]
+                true_points_ = true_points[i:i+1, :first_invalid_index, :first_n_frames] * self.cfg.input_size
+                true_visible_ = true_visible[i:i+1, :first_invalid_index, :first_n_frames]
 
                 if set((1 - (~true_visible_).detach().cpu().numpy()).flatten().tolist()) == {0}:
                     log.info(f"Skipping batch {batch_idx} for point tracking, all points are occluded")
