@@ -1,14 +1,16 @@
 # !/bin/bash
 python chewbacca/validate.py -m \
 --config-name gmae_ema.yaml \
+hydra/launcher=submitit_slurm \
+launcher=slurm_em \
 model._target_="chewbacca.models.zeroshot_gmae.ZeroshotLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vgmae_large_zeroshot \
+task_name=vgmae_base_zeroshot \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="finetune" \
-configs.model_name="mae_vit_large_patch16" \
+configs.model_name="mae_vit_base_patch16" \
 configs.input_size=224 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
@@ -26,10 +28,10 @@ configs.seq_length=16 \
 configs.num_classes=400 \
 configs.dataset_type="video" \
 trainer.limit_train_batches=1000 \
-trainer.limit_val_batches=100 \
+trainer.limit_val_batches=1000 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="eval-davis_ucf101_point-tracking_save-images_no-mask_interpolate-pos-emb" \
-configs.weights_path="/home/jathu/gmae_logs/vgmae_large_k400_test4/0/checkpoints/last.ckpt" \
+configs.training_type="eval-kinetics_ucf101_point-tracking_save-images_no-mask_interpolate-pos-emb" \
+configs.weights_path="/home/jathu/gmae_logs/vgmae_base_k400_test1/3/checkpoints/last.ckpt" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \
 configs.finetune_params.num_fourier_features=64 \

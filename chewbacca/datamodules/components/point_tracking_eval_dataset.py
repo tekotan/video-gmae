@@ -228,4 +228,4 @@ class PointTrackingEvalDataset(IterableDataset):
                 # 7) Yield
                 yield (frames_chunk.float(), query_points_torch.float(), target_points_torch.float(), occluded_points_torch.float())
 
-                start_idx += 5 # self.bin_size
+                start_idx += self.bin_size

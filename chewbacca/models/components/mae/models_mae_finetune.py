@@ -53,8 +53,9 @@ class CrossAttentionReadout(nn.Module):
         fourier_dim = self.num_fourier_features * cond_size  # 3 for xyz coords, *2 for sin/cos
         self.fourier_embedding = nn.Linear(fourier_dim, 512)
         self.query_mlp = nn.Sequential(
-            # nn.Linear(512, 512),
-            # nn.GELU(),
+            nn.GELU(),
+            nn.Linear(512, 512),
+            nn.GELU(),
             nn.Linear(512, embed_dim)
         )
 

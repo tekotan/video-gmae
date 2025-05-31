@@ -467,6 +467,14 @@ class ZeroshotLitModule(LightningModule):
             clip.write_videofile(f"{self.cfg.storage_folder}/results/{train_}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
         if self.cfg.inference.testing:
+            if self.cfg.inference.save_predictions:
+                imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=video.device).to(dtype=video.dtype)
+                imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=video.device).to(dtype=video.dtype)
+                imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
+                imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
+                data = {"video": imgs, "init_queries": init_queries, "points_pred": x_points, "occlusions_pred": occlusions_pred, "points_gt": finetune_target, "occlusions_gt": occluded_points}
+                torch.save(data, f"{self.cfg.storage_folder}/tests/eval_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
+                
             title = f"eval_{self.cfg.inference.context_length}" if "eval" in self.cfg.training_type else "kubric"
             clip = ImageSequenceClip(final_image_, fps=1).resize(2)  # fps can be adjusted to your need
             clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
@@ -516,15 +524,15 @@ class ZeroshotLitModule(LightningModule):
                 first_invalid_index = true_points.shape[1]
             else:
                 first_invalid_index = first_invalid_index[0]
-
+            first_n_frames = self.cfg.seq_length # 5
             query_points_ = query_points[i:i+1, :first_invalid_index]
             query_points_[:, :, 1:] *= self.cfg.input_size
 
-            pred_points_ = pred_points[i:i+1, :first_invalid_index]
-            pred_visible_ = pred_visible[i:i+1, :first_invalid_index]
+            pred_points_ = pred_points[i:i+1, :first_invalid_index, :first_n_frames]
+            pred_visible_ = pred_visible[i:i+1, :first_invalid_index, :first_n_frames]
 
-            true_points_ = true_points[i:i+1, :first_invalid_index] * self.cfg.input_size
-            true_visible_ = true_visible[i:i+1, :first_invalid_index]
+            true_points_ = true_points[i:i+1, :first_invalid_index, :first_n_frames] * self.cfg.input_size
+            true_visible_ = true_visible[i:i+1, :first_invalid_index, :first_n_frames]
 
             if set((1 - (~true_visible_)).flatten().tolist()) == {0}:
                 log.info(f"Skipping batch {batch_idx} for point tracking, all points are occluded")
