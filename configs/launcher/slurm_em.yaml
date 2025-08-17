@@ -12,7 +12,7 @@ hydra:
     tasks_per_node: ${trainer.devices}
     nodes: ${trainer.num_nodes}
     cpus_per_task: 10
-    qos: low
+    qos: medium
     timeout_min: 4320
     # constraint: 'volta32gb'
     name: ${task_name}
