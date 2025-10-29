@@ -96,6 +96,26 @@ class VideoDataModule(LightningDataModule):
             video_paths_val = np.load("data/kinetics_val_label.npy")
             self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
             self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+        elif "kubric" in self.hparams.cfg.training_type:
+            from chewbacca.datamodules.components.video_dataset import VideoDataset
+            video_paths_train = np.concatenate([
+                np.load("data/kubric_train_label.npy"),
+                np.load("data/kinetics_train_subset.npy")
+            ])
+            video_paths_val = np.load("data/kubric_val_label.npy")
+            self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
+            self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+        elif "zeroshot" in self.hparams.cfg.training_type:
+            from chewbacca.datamodules.components.video_dataset import VideoDataset
+            video_paths_train = np.concatenate([
+                np.load("data/kubric_train_label.npy"),
+                np.load("data/kinetics_train_subset.npy"),
+                np.load("data/davis_label.npy"),
+            ])
+            video_paths_val = np.load("data/kubric_val_label.npy")
+            self.data_train = VideoDataset(self.hparams.cfg, video_paths_train, True)
+            self.data_val = VideoDataset(self.hparams.cfg, video_paths_val, False)
+            
         elif "testdata" in self.hparams.cfg.training_type:
             from chewbacca.datamodules.components.video_dataset import VideoDataset
             video_paths_train = np.load("data/test_data_label.npy")
