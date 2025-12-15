@@ -34,9 +34,9 @@ configs.load_strict=False \
 configs.mask_ratio=0.0 \
 configs.finetune_params.num_fourier_features=64 \
 configs.finetune_params.new_readout_mode=True \
-configs.finetune_params.tracks_to_sample=16 \
+configs.finetune_params.tracks_to_sample=14 \
 configs.inference.testing=True \
 configs.inference.context_length=1 \
-configs.inference.save_predictions=True
+configs.inference.save_predictions=False
 
 # configs.weights_path="/home/jathu/gmae_logs/vgmae_base_k400_test1/3/checkpoints/last.ckpt" \
