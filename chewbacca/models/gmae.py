@@ -410,7 +410,6 @@ class GMAELitModule(LightningModule):
 
         # for video based pretraining
         elif(self.cfg.dataset_type=="video"):
-
             video = batch[0] # bs, 3, t, h, w
             labels = batch[1]
             dataset = batch[2] # dataset index
@@ -492,7 +491,8 @@ class GMAELitModule(LightningModule):
                     final_image_ = []
                     for i in range(len(pred_ab)):
                         final_image = np.concatenate([imgs[:, i], pred_ab[i]], axis=2).reshape(-1, (imgs[:, 0].shape[2]+pred_ab[0].shape[2]), 3)
-                        if "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type or "kinetics" in self.cfg.training_type:
+                        if "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type or "kinetics" in self.cfg.training_type or \
+                           "zeroshot" in self.cfg.training_type or "kubric" in self.cfg.training_type:
                             final_image_.append(final_image)
                         else:
                             final_image_.append(final_image[:, :, ::-1])

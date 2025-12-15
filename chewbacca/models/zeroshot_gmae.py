@@ -231,7 +231,26 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
     return [
         {'params': no_decay, 'weight_decay': 0.},
         {'params': decay, 'weight_decay': weight_decay}]
+class attntion_probe(nn.Module):
+    def __init__(self, num_heads, in_dim, out_dim):
+        super().__init__()
+        self.num_heads = num_heads
+        self.q_ = nn.Parameter(torch.randn(1, out_dim//num_heads))
+        self.wk = nn.Linear(in_dim, out_dim)
+        self.wv = nn.Linear(in_dim, out_dim)
+        self.scale = 1 / (out_dim // num_heads) ** 0.5
 
+    def forward(self, x):
+        # implements multi-head attention with fixed query
+        # x: (N, L, D)
+        k = self.wk(x).view(x.shape[0], x.shape[1], self.num_heads, -1).transpose(1, 2)
+        v = self.wv(x).view(x.shape[0], x.shape[1], self.num_heads, -1).transpose(1, 2)
+        q = self.q_.unsqueeze(0)[:, :, None, :].repeat(1, 1, self.num_heads, 1) * self.scale
+        attn = torch.einsum('nlhd,nhkd->nhlk', q, k)
+        attn = attn.softmax(dim=-1)
+        attn_output = torch.einsum('nhlk,nhkd->nhld', attn, v)
+        attn_output = attn_output.transpose(1, 2).view(x.shape[0], -1)
+        return attn_output
 
 def gpu_mem_usage():
     """Computes the GPU memory usage for the current device (MB)."""
@@ -258,9 +277,207 @@ def dense_flow_one_frame(means_t,    # (G,3)
 
     return flow.detach()
 
-def get_zeroshot_flow(data):
+def render_soft_assignments(means, quats, scales, opacities,
+                            view, K, W, H, chunk=32, device="cuda"):
+    """
+    Render per-pixel per-Gaussian contribution weights.
+    Returns: (H, W, N) torch.float32 on CPU.
+    """
+    N = means.shape[0]
+    if N == 0:
+        return torch.zeros(H, W, 0, dtype=torch.float32)
+
+    W_full = torch.zeros(H, W, N, device=device, dtype=torch.float32)
+    for start in range(0, N, chunk):
+        end = min(start + chunk, N)
+        D = end - start
+        if D <= 0:
+            continue
+        colors = torch.zeros(N, D, device=device, dtype=torch.float32)
+        colors[start:end, torch.arange(D, device=device)] = 1.0
+
+        cols, alphas, _ = rasterization(
+            means, quats, scales, opacities.squeeze(-1), colors,
+            view[None], K[None], width=W, height=H,
+            packed=False, render_mode="RGB"
+        )
+        W_full[:, :, start:end] = cols[0]
+
+    return W_full.detach().cpu()
+
+def project_centers(means, quats, scales, view, K, W, H, device="cuda"):
+    """
+    Project Gaussian centers to pixel space and depth.
+    Returns:
+        xy: (N, 2) torch.float32 on CPU
+        z:  (N,)  torch.float32 on CPU
+    """
+    _, xy, _, depths, _ = fully_fused_projection(
+        means, None, quats, scales, view[None], K[None], W, H
+    )
+    return xy.squeeze(0).detach().cpu(), depths.squeeze(0).detach().cpu()
+
+def _bilinear_at(img, x, y):
+    """
+    Bilinear sample from a 2D map (numpy array).
+    """
+    H, W = img.shape[:2]
+    x = float(np.clip(x, 0, W - 1))
+    y = float(np.clip(y, 0, H - 1))
+    x0 = int(np.floor(x))
+    y0 = int(np.floor(y))
+    x1 = min(x0 + 1, W - 1)
+    y1 = min(y0 + 1, H - 1)
+    wx = x - x0
+    wy = y - y0
+    if img.ndim == 3:
+        return ((1 - wx) * (1 - wy) * img[y0, x0] +
+                wx * (1 - wy) * img[y0, x1] +
+                (1 - wx) * wy * img[y1, x0] +
+                wx * wy * img[y1, x1])
+    return ((1 - wx) * (1 - wy) * img[y0, x0] +
+            wx * (1 - wy) * img[y0, x1] +
+            (1 - wx) * wy * img[y1, x0] +
+            wx * wy * img[y1, x1])
+
+def track_points_occlusion(points_xy, flows, W_seq, XY_seq,
+                           topk=8, tau_vis=0.05, tau_re=0.08,
+                           visible_mode="hybrid", beta_hybrid=0.3,
+                           beta_scale_with_mass=True, eps=1e-8):
+    """
+    Occlusion-aware tracking. Returns trajectories, fixed owner ids, mixture weights, and visibility flags.
+    """
+    flows_np = np.asarray(flows, dtype=np.float32)
+    W_seq_np = np.asarray(W_seq, dtype=np.float32)
+    XY_seq_np = np.asarray(XY_seq, dtype=np.float32)
+
+    Tm1 = flows_np.shape[0] if flows_np.ndim >= 4 else 0
+    H = flows_np.shape[1] if Tm1 > 0 else (W_seq_np.shape[1] if W_seq_np.ndim == 4 else 0)
+    W = flows_np.shape[2] if Tm1 > 0 else (W_seq_np.shape[2] if W_seq_np.ndim == 4 else 0)
+    T = Tm1 + 1
+    G = W_seq_np.shape[-1] if W_seq_np.ndim == 4 else 0
+    N = points_xy.shape[0]
+
+    max_g = max(G, 1)
+    topk_eff = max(1, min(topk, max_g))
+
+    traj = np.zeros((T, N, 2), dtype=np.float32)
+    vis = np.zeros((T, N), dtype=np.float32)
+    pis = np.zeros((T, N, topk_eff), dtype=np.float32)
+    ids_fixed = np.zeros((N, topk_eff), dtype=np.int32)
+    offs = np.zeros((N, topk_eff, 2), dtype=np.float32)
+
+    if N == 0:
+        return traj, ids_fixed, pis, vis
+
+    traj[0] = points_xy.astype(np.float32)
+
+    def topk_indices_at(Wimg, x, y, k):
+        if Wimg.ndim == 0 or Wimg.size == 0:
+            return np.zeros((k,), dtype=np.int32), np.zeros((k,), dtype=np.float32)
+        w_vec = _bilinear_at(Wimg, x, y)
+        if np.isscalar(w_vec):
+            w_vec = np.array([float(w_vec)], dtype=np.float32)
+        if w_vec.ndim == 0:
+            w_vec = w_vec[None]
+        idx = np.argpartition(-w_vec, kth=min(k - 1, len(w_vec) - 1))[:k]
+        idx = idx[np.argsort(-w_vec[idx])]
+        w_k = w_vec[idx]
+        if len(idx) < k:
+            pad_idx = idx[-1] if len(idx) else 0
+            idx = np.pad(idx, (0, k - len(idx)), constant_values=pad_idx)
+            w_k = np.pad(w_k, (0, k - len(w_k)), constant_values=0.0)
+        return idx.astype(np.int32), w_k.astype(np.float32)
+
+    if Tm1 > 0 and W_seq_np.ndim == 4 and W_seq_np.shape[0] > 0:
+        W0 = W_seq_np[0]
+    else:
+        W0 = np.zeros((H, W, G), dtype=np.float32)
+
+    for j in range(N):
+        x0, y0 = traj[0, j]
+        idx_k, w_k = topk_indices_at(W0, x0, y0, topk_eff)
+        ids_fixed[j] = idx_k
+        mass0 = float(np.sum(w_k))
+        vis[0, j] = 1.0 if mass0 >= tau_vis else 0.0
+
+    for t in range(1, T):
+        F_tm1 = flows_np[t - 1] if Tm1 > 0 else np.zeros((H, W, 2), dtype=np.float32)
+        W_tm1 = W_seq_np[t - 1] if W_seq_np.shape[0] >= t else np.zeros((H, W, G), dtype=np.float32)
+        XY_t = XY_seq_np[t - 1] if XY_seq_np.shape[0] >= t else np.zeros((G, 2), dtype=np.float32)
+
+        for j in range(N):
+            x_prev, y_prev = traj[t - 1, j]
+            owners = ids_fixed[j]
+            cxcy = XY_t[owners] if XY_t.size else np.zeros((topk_eff, 2), dtype=np.float32)
+
+            w_vec_full = _bilinear_at(W_tm1, x_prev, y_prev) if W_tm1.size else np.zeros((G,), dtype=np.float32)
+            if np.isscalar(w_vec_full):
+                w_vec_full = np.array([float(w_vec_full)], dtype=np.float32)
+            if w_vec_full.ndim == 0:
+                w_vec_full = w_vec_full[None]
+            if w_vec_full.size == 0:
+                w_k = np.zeros((topk_eff,), dtype=np.float32)
+            else:
+                w_k = w_vec_full[owners]
+            mass = float(np.sum(w_k))
+            if mass > 0:
+                pi_k = (w_k / (mass + eps)).astype(np.float32)
+            else:
+                pi_k = np.full((topk_eff,), 1.0 / topk_eff, dtype=np.float32)
+            pis[t - 1, j] = pi_k
+
+            if t == 1 and not np.any(offs[j]):
+                p_prim_next = np.sum(cxcy * pi_k[:, None], axis=0)
+            else:
+                p_prim_next = np.sum((cxcy + offs[j]) * pi_k[:, None], axis=0)
+
+            if mass >= tau_vis:
+                if visible_mode == "flow":
+                    u, v = _bilinear_at(F_tm1, x_prev, y_prev)
+                    p_flow_next = np.array([x_prev + u, y_prev + v], dtype=np.float32)
+                    p_next = p_flow_next
+                elif visible_mode == "mixture":
+                    p_next = p_prim_next.astype(np.float32)
+                else:
+                    u, v = _bilinear_at(F_tm1, x_prev, y_prev)
+                    p_flow_next = np.array([x_prev + u, y_prev + v], dtype=np.float32)
+                    if beta_scale_with_mass:
+                        beta = float(beta_hybrid) * max(0.0, 1.0 - min(1.0, mass))
+                    else:
+                        beta = float(beta_hybrid)
+                    p_next = ((1.0 - beta) * p_flow_next + beta * p_prim_next).astype(np.float32)
+                vis[t, j] = 1.0
+            else:
+                p_next = p_prim_next.astype(np.float32)
+                vis[t, j] = 0.0
+
+            if W and H:
+                x_next = float(p_next[0])
+                y_next = float(p_next[1])
+                if (x_next < 0) or (x_next >= W) or (y_next < 0) or (y_next >= H):
+                    vis[t, j] = 0.0
+            traj[t, j] = p_next
+            offs[j] = p_next[None, :] - cxcy
+
+    if T >= 2:
+        pis[-1] = pis[-2]
+    return traj, ids_fixed, pis, vis
+
+def get_zeroshot_flow(data, chunk=32):
     device = data["x_points"].device
-    T, H, W = 16, 224, 224
+    video = data["video"]
+    if torch.is_tensor(video):
+        T = video.shape[1]
+        H, W = video.shape[2:4]
+    else:
+        video_np = np.asarray(video)
+        T = video_np.shape[1]
+        H, W = video_np.shape[2:4]
+
+    if T <= 0:
+        raise ValueError("Video must contain at least one frame.")
+
     f = 0.5 * W / math.tan(math.pi / 4)
     K = torch.tensor([[f, 0, W / 2],
                       [0, W / H * f, H / 2],
@@ -270,16 +487,27 @@ def get_zeroshot_flow(data):
                          [0, 0, 1, 8],
                          [0, 0, 0, 1]], device=device).float()
 
-    H, W = data["video"].shape[2:4]
     batch_flows = []
+    batch_weights = []
+    batch_centers = []
     for i in range(data["x_points"].shape[0]):
         x = data["x_points"][i]
-        
+
         allmeans = 5 * torch.tanh(x[:, :3])
-        mean_deltas = allmeans[256:].reshape(-1, 256, 3) / 10
-        means = allmeans[:256]
-        scales = torch.sigmoid(x[:, 3:6])[:256]
-        q_raw = torch.sigmoid(x[:, 6:10])[:256]
+        total_gaussians = allmeans.shape[0]
+        if total_gaussians % T != 0:
+            raise ValueError(
+                f"Expected total gaussians ({total_gaussians}) to be divisible by number of frames ({T})."
+            )
+        num_gaussians = total_gaussians // T
+
+        means = allmeans[:num_gaussians]
+        if T > 1:
+            mean_deltas = allmeans[num_gaussians:].reshape(T - 1, num_gaussians, 3) / 10
+        else:
+            mean_deltas = allmeans.new_zeros((0, num_gaussians, 3))
+        scales = torch.sigmoid(x[:, 3:6])[:num_gaussians]
+        q_raw = torch.sigmoid(x[:, 6:10])[:num_gaussians]
 
         a, b, c = q_raw[..., 0:1], q_raw[..., 1:2], q_raw[..., 2:3]
         quats_all = torch.cat(
@@ -292,13 +520,14 @@ def get_zeroshot_flow(data):
             -1,
         )
 
-        opacities_all = torch.sigmoid(x[:, 13:14])[:256]
-        rgb = x[:, 10:13]
+        opacities_all = torch.sigmoid(x[:, 13:14])[:num_gaussians]
 
         flows = []
+        weights = []
+        centers = []
         means_ = means.clone()
-        for t in tqdm(range(T - 1), desc="compute flow"):
-            flow = dense_flow_one_frame(
+        for t in tqdm(range(max(T - 1, 0)), desc="compute flow", leave=False):
+            flow_t = dense_flow_one_frame(
                 means_,
                 mean_deltas[t],
                 quats_all,
@@ -308,32 +537,87 @@ def get_zeroshot_flow(data):
                 K,
                 W, H,
                 device=device)
-            flows.append(flow)
-            means_ = means_ + mean_deltas[t]
-        
-        flows = torch.stack(flows, dim=0)
-        batch_flows.append(flows)
+            flows.append(flow_t.detach().cpu())
+
+            weights_t = render_soft_assignments(
+                means_, quats_all, scales, opacities_all,
+                view, K, W, H, chunk=chunk, device=device
+            ).float()
+            weights.append(weights_t)
+
+            means_next = means_ + mean_deltas[t]
+            xy_next, _ = project_centers(
+                means_next, quats_all, scales, view, K, W, H, device=device
+            )
+            centers.append(xy_next.float())
+
+            means_ = means_next
+        if flows:
+            flows_tensor = torch.stack(flows, dim=0)
+        else:
+            flows_tensor = torch.zeros((0, H, W, 2), dtype=torch.float32)
+        if weights:
+            weights_tensor = torch.stack(weights, dim=0)
+        else:
+            weights_tensor = torch.zeros((0, H, W, num_gaussians), dtype=torch.float32)
+        if centers:
+            centers_tensor = torch.stack(centers, dim=0)
+        else:
+            centers_tensor = torch.zeros((0, num_gaussians, 2), dtype=torch.float32)
+
+        batch_flows.append(flows_tensor)
+        batch_weights.append(weights_tensor)
+        batch_centers.append(centers_tensor)
+
     batch_flows = torch.stack(batch_flows, dim=0)
+    batch_weights = torch.stack(batch_weights, dim=0)
+    batch_centers = torch.stack(batch_centers, dim=0)
 
-    return batch_flows
+    return batch_flows, batch_weights, batch_centers
 
-def track_points(points_xy, flows):
+def track_points_with_occlusions(points_xyz, flows, weights, centers, image_size,
+                                 topk=8, tau_vis=0.05, tau_re=0.08,
+                                 visible_mode="hybrid", beta_hybrid=0.3,
+                                 beta_scale_with_mass=True):
     """
-    Track points through a sequence of optical flow fields.
-    :param points_xy: (N,2) array of points to track
-    :param flows: (T,H,W,2) array of optical flow fields
-    :return: (T,N,2) array of tracked points
+    Wrapper that converts query points and runs occlusion-aware tracking.
+    Returns:
+        tracks: (T, N, 2)
+        occlusions: (T, N) with 1 indicating occluded.
     """
-    T = len(flows) + 1
-    N = len(points_xy)
-    tracked_points = np.zeros((T, N, 2), dtype=np.float32)
-    tracked_points[0] = points_xy[:, 1:][:, ::-1]
-    for t in range(1, T):
-        u = cv2.remap(flows[t-1][..., 0], tracked_points[t-1, :, 0], tracked_points[t-1, :, 1], cv2.INTER_LINEAR)
-        v = cv2.remap(flows[t-1][..., 1], tracked_points[t-1, :, 0], tracked_points[t-1, :, 1], cv2.INTER_LINEAR)
-        tracked_points[t] = (tracked_points[t-1] + np.concatenate([u, v], axis=-1)).clip(0, 224)
+    flows_np = np.asarray(flows, dtype=np.float32)
+    weights_np = np.asarray(weights, dtype=np.float32)
+    centers_np = np.asarray(centers, dtype=np.float32)
+    if flows_np.ndim >= 4:
+        T = flows_np.shape[0] + 1
+    else:
+        T = 1
 
-    return tracked_points
+    points_arr = np.asarray(points_xyz, dtype=np.float32)
+    if points_arr.size == 0:
+        return (
+            np.zeros((T, 0, 2), dtype=np.float32),
+            np.zeros((T, 0), dtype=np.float32),
+        )
+
+    points_xy = points_arr[:, [2, 1]]  # (x, y)
+    traj, _, _, vis = track_points_occlusion(
+        points_xy,
+        flows_np,
+        weights_np,
+        centers_np,
+        topk=topk,
+        tau_vis=tau_vis,
+        tau_re=tau_re,
+        visible_mode=visible_mode,
+        beta_hybrid=beta_hybrid,
+        beta_scale_with_mass=beta_scale_with_mass,
+    )
+    traj = traj.astype(np.float32)
+    if image_size is not None:
+        traj = np.clip(traj, 0, float(image_size))
+    occlusions = (vis < 0.5).astype(np.float32)
+    return traj, occlusions
 
 class ZeroshotLitModule(LightningModule):
     """
@@ -394,6 +678,23 @@ class ZeroshotLitModule(LightningModule):
         self.occ_tp = SumMetric()
         self.occ_fp = SumMetric()
         self.occ_fn = SumMetric()
+
+        # just to match weights from training:
+
+        if self.cfg.videomae:
+            num_hidden_layers = len(self.encoder.videomae_model.encoder.layer) + 1
+        elif self.cfg.mae_st:
+            num_hidden_layers = len(self.encoder.mae_st_model.blocks)
+        else:
+            num_hidden_layers = len(self.encoder.blocks)
+            
+        hsize = self.encoder.patch_embed.proj.weight.shape[0]
+
+        if "attn" in self.cfg.training_type:
+            self.linear_layer = nn.ModuleList([torch.nn.Sequential(attntion_probe(8, hsize, hsize), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
+        else:
+            self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
+        self.test_rfid = FrechetInceptionDistance()
   
     def forward_loss(self, imgs, pred, mask, frame_num=None, deltas=None, additional_data=None):
         return torch.tensor(0).to(imgs.device).to(imgs.dtype)
@@ -415,7 +716,6 @@ class ZeroshotLitModule(LightningModule):
         imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
 
         preds_all = []
-
         with torch.no_grad():
             x_points = self.encoder.forward_decoder(latent, ids_restore)
                 
@@ -426,33 +726,106 @@ class ZeroshotLitModule(LightningModule):
         # zeroshot tracking
         scale_factor = np.array([1, self.cfg.input_size, self.cfg.input_size])
 
-        batch_flows = get_zeroshot_flow(primitives)
+        inference_cfg = getattr(self.cfg, "inference", None)
+        tau_vis = 0.5
+        tau_re = 0.08
+        tracking_topk = 8
+        visible_mode = "hybrid"
+        beta_hybrid = 0.3
+        beta_scale_with_mass = True
+        if inference_cfg is not None:
+            tau_vis_val = getattr(inference_cfg, "tau_vis", None)
+            if tau_vis_val is not None:
+                tau_vis = float(tau_vis_val)
+            tau_re_val = getattr(inference_cfg, "tau_re", None)
+            if tau_re_val is not None:
+                tau_re = float(tau_re_val)
+            topk_val = getattr(inference_cfg, "tracking_topk", None)
+            if topk_val is not None:
+                tracking_topk = int(topk_val)
+            visible_mode_val = getattr(inference_cfg, "visible_mode", None)
+            if visible_mode_val is not None:
+                visible_mode = str(visible_mode_val).lower()
+            beta_hybrid_val = getattr(inference_cfg, "beta_hybrid", None)
+            if beta_hybrid_val is not None:
+                beta_hybrid = float(beta_hybrid_val)
+            beta_scale_val = getattr(inference_cfg, "beta_scale_with_mass", None)
+            if beta_scale_val is not None:
+                if isinstance(beta_scale_val, str):
+                    beta_scale_with_mass = beta_scale_val.lower() in {"1", "true", "yes", "y"}
+                else:
+                    beta_scale_with_mass = bool(beta_scale_val)
+        if visible_mode not in {"flow", "mixture", "hybrid"}:
+            visible_mode = "hybrid"
+
+        if torch.is_tensor(init_queries):
+            init_queries_np = init_queries.detach().cpu().numpy()
+        else:
+            init_queries_np = np.asarray(init_queries)
+        if torch.is_tensor(occluded_points):
+            occluded_np = occluded_points.detach().cpu().numpy()
+        else:
+            occluded_np = np.asarray(occluded_points)
+
+        batch_flows, batch_weights, batch_centers = get_zeroshot_flow(primitives)
         x_points = []
         occlusions_pred = []
         
         for i in range(batch_flows.shape[0]):
-            queries = init_queries[i].cpu().numpy()
-            valid_queries = queries[queries[:, 0] != -1] * scale_factor
+            queries = init_queries_np[i]
+            valid_mask = queries[:, 0] != -1
+            valid_queries = (queries[valid_mask] * scale_factor) if np.any(valid_mask) else np.empty((0, 3))
+            valid_queries = valid_queries.astype(np.float32, copy=False)
+
+            flows_np = batch_flows[i].numpy()
+            weights_np = batch_weights[i].numpy()
+            centers_np = batch_centers[i].numpy()
+            num_frames = flows_np.shape[0] + 1 if flows_np.ndim >= 4 else 1
 
             if valid_queries.shape[0] == 0:
-                x_points.append(np.zeros((batch_flows.shape[1]+1, queries.shape[0], 2)))
-                occlusions_pred.append(np.zeros((batch_flows.shape[1]+1, queries.shape[0])))
+                x_points.append(np.zeros((num_frames, queries.shape[0], 2), dtype=np.float32))
+                occlusions_pred.append(np.zeros((num_frames, queries.shape[0]), dtype=np.float32))
                 continue
-            
-            tracks = track_points(valid_queries, batch_flows[i].cpu().numpy())
-            tracks = np.concatenate([
-                tracks, 
-                np.zeros((tracks.shape[0], queries.shape[0] - valid_queries.shape[0], 2))
-            ], axis=1)
-            tracks = tracks.clip(0, self.cfg.input_size)
 
-            x_points.append(tracks)
-            occlusions_pred.append(np.zeros_like(tracks[:, :, 0]))
+            tracks, occlusion = track_points_with_occlusions(
+                valid_queries,
+                flows_np,
+                weights_np,
+                centers_np,
+                self.cfg.input_size,
+                topk=tracking_topk,
+                tau_vis=tau_vis,
+                tau_re=tau_re,
+                visible_mode=visible_mode,
+                beta_hybrid=beta_hybrid,
+                beta_scale_with_mass=beta_scale_with_mass,
+            )
+
+            tracks_full = np.zeros((tracks.shape[0], queries.shape[0], 2), dtype=np.float32)
+            occlusion_full = np.zeros((occlusion.shape[0], queries.shape[0]), dtype=np.float32)
+            tracks_full[:, valid_mask, :] = tracks
+            occlusion_full[:, valid_mask] = occlusion
+
+            x_points.append(tracks_full)
+            occlusions_pred.append(occlusion_full)
 
         x_points = np.stack(x_points, axis=0)
         x_points = x_points.transpose(0, 2, 1, 3)
         occlusions_pred = np.stack(occlusions_pred, axis=0)
         occlusions_pred = occlusions_pred.transpose(0, 2, 1)
+
+        for vid_idx in range(init_queries_np.shape[0]):
+            valid_mask = init_queries_np[vid_idx, :, 0] != -1
+            total_valid = int(valid_mask.sum())
+            if total_valid == 0:
+                gt_pct = 0.0
+                pred_pct = 0.0
+            else:
+                gt_vals = np.asarray(occluded_np[vid_idx, valid_mask], dtype=np.float32).reshape(-1)
+                pred_vals = np.asarray(occlusions_pred[vid_idx, valid_mask], dtype=np.float32).reshape(-1)
+                gt_pct = float(gt_vals.mean() * 100.0) if gt_vals.size else 0.0
+                pred_pct = float(pred_vals.mean() * 100.0) if pred_vals.size else 0.0
+            print(f"[Occlusion] batch {batch_idx} video {vid_idx}: GT {gt_pct:.2f}% occluded | Pred {pred_pct:.2f}% occluded")
 
         # visualize tracking
         final_image_ = self.visualize_point_tracking(video, x_points, init_queries, finetune_target, occluded_points, occlusions_pred)
@@ -473,9 +846,10 @@ class ZeroshotLitModule(LightningModule):
                 imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
                 imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
                 data = {"video": imgs, "init_queries": init_queries, "points_pred": x_points, "occlusions_pred": occlusions_pred, "points_gt": finetune_target, "occlusions_gt": occluded_points}
-                torch.save(data, f"{self.cfg.storage_folder}/tests/eval_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
+                torch.save(data, f"{self.cfg.storage_folder}/tests/gmrw-davis_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
                 
-            title = f"eval_{self.cfg.inference.context_length}" if "eval" in self.cfg.training_type else "kubric"
+            # title = f"eval_{self.cfg.inference.context_length}" if "eval" in self.cfg.training_type else "kubric"
+            title = f"gmrw-davis_{self.cfg.inference.context_length}"
             clip = ImageSequenceClip(final_image_, fps=1).resize(2)  # fps can be adjusted to your need
             clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
@@ -524,7 +898,7 @@ class ZeroshotLitModule(LightningModule):
                 first_invalid_index = true_points.shape[1]
             else:
                 first_invalid_index = first_invalid_index[0]
-            first_n_frames = self.cfg.seq_length # 5
+            first_n_frames = 5 # self.cfg.seq_length
             query_points_ = query_points[i:i+1, :first_invalid_index]
             query_points_[:, :, 1:] *= self.cfg.input_size
 

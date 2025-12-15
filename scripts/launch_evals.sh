@@ -2,6 +2,7 @@
 # vgmae_base_zeroshot
 # vgmae_large_seq16_finetune_point_lr_sweep_new, vgmae_large_seq16_fullfinetune_point_new
 # vgmae_base_seq16_finetune_point_lr_sweep_new, vgmae_base_seq16_fullfinetune_point_lr_sweep_new
+# mae_st_large_seq16_finetune_point_lr_sweep_new, videomae_large_seq16_finetune_point_lr_sweep_new
 
 python chewbacca/validate.py -m \
 --config-name gmae_ema.yaml \
@@ -9,12 +10,12 @@ hydra/launcher=submitit_slurm \
 launcher=slurm_em \
 model._target_="chewbacca.models.finetune.FinetuneLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vgmae_base_seq16_finetune_point_lr_sweep_new \
+task_name=mae_st_large_seq16_finetune_point_lr_sweep_new \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
 configs.task="finetune" \
-configs.model_name="finetune_vit_base_patch16" \
+configs.model_name="finetune_vit_large_patch16" \
 configs.input_size=224 \
 configs.lr=1e-4 \
 configs.weight_decay=5e-2 \
@@ -31,15 +32,17 @@ trainer.max_epochs=200 \
 configs.seq_length=16 \
 configs.num_classes=400 \
 configs.dataset_type="video" \
-trainer.limit_train_batches=1000000 \
-trainer.limit_val_batches=1000000 \
+trainer.limit_train_batches=1000 \
+trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="eval-rgb_ucf101_point-tracking_save-images_no-mask_interpolate-pos-emb" \
+configs.training_type="eval-davis_ucf101_point-tracking_save-images_no-mask_interpolate-pos-emb","eval-kinetics_ucf101_point-tracking_save-images_no-mask_interpolate-pos-emb","train_ucf101_point-tracking_save-images_no-mask_interpolate-pos-emb" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \
 configs.finetune_params.num_fourier_features=64 \
 configs.finetune_params.new_readout_mode=True \
 configs.finetune_params.tracks_to_sample=16 \
+configs.mae_st="large" \
+configs.videomae=False \
 configs.inference.testing=True \
 configs.inference.context_length=1 \
 configs.inference.save_predictions=True

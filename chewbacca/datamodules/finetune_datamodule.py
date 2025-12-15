@@ -111,6 +111,18 @@ class FinetuneDataModule(LightningDataModule):
                 ]
                 self.data_val = PointTrackingEvalDataset(pickle_files, self.hparams.cfg)
                 self.data_train = self.data_val
+            elif "gmrw-kinetics" in self.hparams.cfg.training_type:
+                from chewbacca.datamodules.components.gmrw_kinetics_dataset import GMRWKineticsDataset
+
+                dataset = GMRWKineticsDataset(self.hparams.cfg)
+                self.data_val = dataset
+                self.data_train = dataset
+            elif "gmrw-davis" in self.hparams.cfg.training_type:
+                from chewbacca.datamodules.components.gmrw_davis_dataset import GMRWDavisDataset
+
+                dataset = GMRWDavisDataset(self.hparams.cfg)
+                self.data_val = dataset
+                self.data_train = dataset
             elif "train" in self.hparams.cfg.training_type:
                 from chewbacca.datamodules.components.kubric_dataset import KubricPointTrackingDataset
                 self.data_train = KubricPointTrackingDataset(self.hparams.cfg, True)

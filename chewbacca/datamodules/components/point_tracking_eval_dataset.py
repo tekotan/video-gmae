@@ -111,9 +111,11 @@ class PointTrackingEvalDataset(IterableDataset):
             if isinstance(data, dict):
                 # DAVIS-like => {video_name: content_dict, ...}
                 for video_name, content in data.items():
-                    resized_video = resize_video(content["video"], nearest_power_of_two)
-                    del content["video"]
-                    content["video"] = resized_video
+                    if "eval-kinetics" in self.cfg.training_type:
+                        resized_video = resize_video(content["video"], nearest_power_of_two)
+                        del content["video"]
+                        content["video"] = resized_video
+                        
                     self.all_items.append((video_name, content))
             elif isinstance(data, list):
                 # RGB-Stacking => [ content_dict, ... ]
@@ -140,6 +142,9 @@ class PointTrackingEvalDataset(IterableDataset):
             frames_np = content["video"]   # shape (T, H, W, 3), uint8
             points_np = content["points"]  # shape (N, T, 2), float32
             occluded_np = content["occluded"].astype(float)  # shape (N, T), float
+
+            if frames_np.dtype == np.uint8:
+                frames_np = frames_np.astype(np.float32) / 255.0
 
             T = frames_np.shape[0]
             N = points_np.shape[0]

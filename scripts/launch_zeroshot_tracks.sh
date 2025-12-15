@@ -1,11 +1,9 @@
 # !/bin/bash
 python chewbacca/validate.py -m \
 --config-name gmae_ema.yaml \
-hydra/launcher=submitit_slurm \
-launcher=slurm_em \
 model._target_="chewbacca.models.zeroshot_gmae.ZeroshotLitModule" \
 datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
-task_name=vgmae_base_zeroshot \
+task_name=vgmae_base_zeroshot_midtrain_v2 \
 trainer=ddp_unused \
 trainer.devices=1 \
 trainer.num_nodes=1 \
@@ -28,9 +26,9 @@ configs.seq_length=16 \
 configs.num_classes=400 \
 configs.dataset_type="video" \
 trainer.limit_train_batches=1000 \
-trainer.limit_val_batches=1000 \
+trainer.limit_val_batches=100 \
 callbacks.model_checkpoint.every_n_epochs=1 \
-configs.training_type="eval-rgb_ucf101_point-tracking_save-images_no-mask_interpolate-pos-emb" \
+configs.training_type="gmrw-davis_point-tracking_save-images-z_no-mask_random-frames-attn-interpolate" \
 configs.weights_path="/home/jathu/gmae_logs/vgmae_base_k400_test1/3/checkpoints/last.ckpt" \
 configs.load_strict=False \
 configs.mask_ratio=0.0 \
@@ -40,3 +38,5 @@ configs.finetune_params.tracks_to_sample=16 \
 configs.inference.testing=True \
 configs.inference.context_length=1 \
 configs.inference.save_predictions=True
+
+# configs.weights_path="/home/jathu/gmae_logs/vgmae_base_k400_test1/3/checkpoints/last.ckpt" \
