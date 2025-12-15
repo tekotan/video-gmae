@@ -413,14 +413,6 @@ class FinetuneLitModule(LightningModule):
 
         self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
         
-        if self.cfg.finetune_params.use_dit_decoder:
-            import chewbacca.models.components.dit.gaussian_diffusion as gd
-            betas = gd.get_named_beta_schedule("linear", 1000)
-            
-            self.gaussian_diffusion = gd.GaussianDiffusion(
-                betas=betas, model_mean_type=gd.ModelMeanType.EPSILON,
-                model_var_type=gd.ModelVarType.FIXED_LARGE, loss_type=gd.LossType.MSE
-            )
         # setup meters
         # for averaging loss across batches
         self.train_loss = MeanMetric()
@@ -603,7 +595,7 @@ class FinetuneLitModule(LightningModule):
                     
                     if self.cfg.inference.save_predictions:
                         data = (init_queries, box_pred, finetune_target)
-                        torch.save(data, f"{self.cfg.storage_folder}/tests/eval_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
+                        torch.save(data, f"{self.cfg.storage_folder}/tests/finetune_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
 
                     final_image_ = np.concatenate(final_image_, axis=2)
                     
@@ -617,7 +609,7 @@ class FinetuneLitModule(LightningModule):
                 clip.write_videofile(f"{self.cfg.storage_folder}/results/{train_}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
             if self.cfg.inference.testing:
-                title = f"eval_{self.cfg.inference.context_length}" if "eval" in self.cfg.training_type else "kubric"
+                title = f"finetune_{self.cfg.inference.context_length}"
                 clip = ImageSequenceClip(final_image_, fps=1).resize(2)  # fps can be adjusted to your need
                 clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
@@ -730,12 +722,6 @@ class FinetuneLitModule(LightningModule):
         for key in loss_dict.keys():
             self.log("train/loss/" + key, loss_dict[key].item(), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-
-        # for linear probe accuracy on imagenet and k400
-        if("logits_cls" in logits_cls.keys()):
-            for i, layer_ in enumerate(self.linear_layer):
-                if len(logits_cls['logits_cls'][i])>0:
-                    self.train_acc[i](logits_cls['logits_cls'][i], batch[1])
 
 
         # for terminal logging
@@ -851,11 +837,7 @@ class FinetuneLitModule(LightningModule):
             occ_tp = self.occ_tp.compute()
             occ_fp = self.occ_fp.compute()
             occ_fn = self.occ_fn.compute()
-            precision = occ_tp / (occ_tp + occ_fp)
-            recall = occ_tp / (occ_tp + occ_fn)
-            occ_f1 = 2 * ((precision * recall) / (precision + recall))
-            self.log(f"{metric_prefix}/occ_f1", occ_f1, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
-
+            
             jaccard_score = self.average_jaccard.compute()
             self.log(f"{metric_prefix}/jaccard", jaccard_score, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
@@ -873,11 +855,6 @@ class FinetuneLitModule(LightningModule):
             box_mse = self.box_mse.compute()
             self.log(f"{metric_prefix}/box_mse", box_mse, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-        # for linear probe accuracy on imagenet and k400
-        if("logits_cls" in logits_cls.keys()):
-            for i, layer_ in enumerate(self.linear_layer):
-                if len(logits_cls['logits_cls'][i])>0:
-                    self.val_acc[i](logits_cls['logits_cls'][i], batch[1])
 
         # for terminal logging
         self.log_iter_stats(batch_idx)
@@ -912,14 +889,7 @@ class FinetuneLitModule(LightningModule):
             self.box_mse.reset()
             self.box_iou.reset()
 
-        # for linear probe accuracy on imagenet and k400, compute and log the accuracy
         if(self.cfg.task == "finetune" or "imagenet" in self.cfg.training_type or "k400" in self.cfg.training_type or "ucf101" in self.cfg.training_type):
-            for i, layer_ in enumerate(self.linear_layer):
-                self.log(f"{metric_prefix}/linear_probe_acc_" + str(i), self.val_acc[i].compute().item(), prog_bar=True, sync_dist=True)
-                log.info("Accuracy : " + str(self.val_acc[i].compute().item()))
-                # reset the metric
-                self.val_acc[i].reset()
-                self.train_acc[i].reset()
             if self.mode == "point-tracking":
                 log.info("Jaccard Score : " + str(self.average_jaccard.compute().item()))
                 log.info("Avg Distance : " + str(self.avg_distance.compute().item()))
@@ -931,12 +901,7 @@ class FinetuneLitModule(LightningModule):
                 occ_fn = self.occ_fn.compute()
                 precision = occ_tp / (occ_tp + occ_fp)
                 recall = occ_tp / (occ_tp + occ_fn)
-                occ_f1 = 2 * ((precision * recall) / (precision + recall))
-                log.info("Occlusion F1 Score : " + str(occ_f1.item()))
 
-            elif self.mode == "object-tracking":
-                log.info("IoU : " + str(self.box_iou.compute().item()))
-                log.info("Box MSE : " + str(self.box_mse.compute().item()))
 
         # reset the metric
         if self.mode == "point-tracking":
@@ -948,10 +913,6 @@ class FinetuneLitModule(LightningModule):
             self.occ_tp.reset()
             self.occ_fn.reset()
             
-        elif self.mode == "object-tracking":
-            self.box_iou.reset()
-            self.box_mse.reset()
-
         self.val_loss.reset()
         self.train_loss.reset()
 

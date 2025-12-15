@@ -1,41 +1,22 @@
 import math
 import os
-from typing import Any, Optional, Tuple
+from typing import Any
 
-import cv2
-import joblib
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-# import transformers
-# import xformers.ops as xops
-from einops import rearrange
-# from lart.models.components.tokeizers.tokenizer import Tokenizer
 from lightning import LightningModule
 from moviepy.editor import ImageSequenceClip
 from omegaconf import DictConfig
-from timm.data.mixup import Mixup
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from torch import nn
-from torchmetrics import MeanMetric, MeanSquaredError, SumMetric
-from torchmetrics.aggregation import CatMetric
-from torchmetrics.classification.accuracy import Accuracy
+from torchmetrics import MeanMetric, SumMetric
 from torchmetrics.image.fid import FrechetInceptionDistance
-from torchmetrics.image.psnr import PeakSignalNoiseRatio
-from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
-import lpips
 from tqdm import tqdm
 
 from chewbacca.utils import get_pylogger
-from chewbacca.utils.lamb import LARS, Lamb
 from gsplat import rasterization
 from gsplat.cuda._wrapper import (
     fully_fused_projection,
-    isect_offset_encode,
-    isect_tiles,
-    rasterize_to_pixels,
 )
 
 from chewbacca.utils import tapvid_viz_utils
@@ -218,40 +199,6 @@ def compute_tapvid_metrics(
     )
     return metrics
 
-def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
-    decay = []
-    no_decay = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue  # frozen weights
-        if len(param.shape) == 1 or name.endswith(".bias") or name in skip_list:
-            no_decay.append(param)
-        else:
-            decay.append(param)
-    return [
-        {'params': no_decay, 'weight_decay': 0.},
-        {'params': decay, 'weight_decay': weight_decay}]
-class attntion_probe(nn.Module):
-    def __init__(self, num_heads, in_dim, out_dim):
-        super().__init__()
-        self.num_heads = num_heads
-        self.q_ = nn.Parameter(torch.randn(1, out_dim//num_heads))
-        self.wk = nn.Linear(in_dim, out_dim)
-        self.wv = nn.Linear(in_dim, out_dim)
-        self.scale = 1 / (out_dim // num_heads) ** 0.5
-
-    def forward(self, x):
-        # implements multi-head attention with fixed query
-        # x: (N, L, D)
-        k = self.wk(x).view(x.shape[0], x.shape[1], self.num_heads, -1).transpose(1, 2)
-        v = self.wv(x).view(x.shape[0], x.shape[1], self.num_heads, -1).transpose(1, 2)
-        q = self.q_.unsqueeze(0)[:, :, None, :].repeat(1, 1, self.num_heads, 1) * self.scale
-        attn = torch.einsum('nlhd,nhkd->nhlk', q, k)
-        attn = attn.softmax(dim=-1)
-        attn_output = torch.einsum('nhlk,nhkd->nhld', attn, v)
-        attn_output = attn_output.transpose(1, 2).view(x.shape[0], -1)
-        return attn_output
-
 def gpu_mem_usage():
     """Computes the GPU memory usage for the current device (MB)."""
     mem_usage_bytes = torch.cuda.max_memory_allocated()
@@ -341,9 +288,7 @@ def _bilinear_at(img, x, y):
             wx * wy * img[y1, x1])
 
 def track_points_occlusion(points_xy, flows, W_seq, XY_seq,
-                           topk=8, tau_vis=0.05, tau_re=0.08,
-                           visible_mode="hybrid", beta_hybrid=0.3,
-                           beta_scale_with_mass=True, eps=1e-8):
+                           topk=8, tau_vis=0.05, beta_hybrid=0.3, eps=1e-8):
     """
     Occlusion-aware tracking. Returns trajectories, fixed owner ids, mixture weights, and visibility flags.
     """
@@ -433,20 +378,10 @@ def track_points_occlusion(points_xy, flows, W_seq, XY_seq,
                 p_prim_next = np.sum((cxcy + offs[j]) * pi_k[:, None], axis=0)
 
             if mass >= tau_vis:
-                if visible_mode == "flow":
-                    u, v = _bilinear_at(F_tm1, x_prev, y_prev)
-                    p_flow_next = np.array([x_prev + u, y_prev + v], dtype=np.float32)
-                    p_next = p_flow_next
-                elif visible_mode == "mixture":
-                    p_next = p_prim_next.astype(np.float32)
-                else:
-                    u, v = _bilinear_at(F_tm1, x_prev, y_prev)
-                    p_flow_next = np.array([x_prev + u, y_prev + v], dtype=np.float32)
-                    if beta_scale_with_mass:
-                        beta = float(beta_hybrid) * max(0.0, 1.0 - min(1.0, mass))
-                    else:
-                        beta = float(beta_hybrid)
-                    p_next = ((1.0 - beta) * p_flow_next + beta * p_prim_next).astype(np.float32)
+                u, v = _bilinear_at(F_tm1, x_prev, y_prev)
+                p_flow_next = np.array([x_prev + u, y_prev + v], dtype=np.float32)
+                beta = float(beta_hybrid) * max(0.0, 1.0 - min(1.0, mass))
+                p_next = ((1.0 - beta) * p_flow_next + beta * p_prim_next).astype(np.float32)
                 vis[t, j] = 1.0
             else:
                 p_next = p_prim_next.astype(np.float32)
@@ -552,19 +487,10 @@ def get_zeroshot_flow(data, chunk=32):
             centers.append(xy_next.float())
 
             means_ = means_next
-        if flows:
-            flows_tensor = torch.stack(flows, dim=0)
-        else:
-            flows_tensor = torch.zeros((0, H, W, 2), dtype=torch.float32)
-        if weights:
-            weights_tensor = torch.stack(weights, dim=0)
-        else:
-            weights_tensor = torch.zeros((0, H, W, num_gaussians), dtype=torch.float32)
-        if centers:
-            centers_tensor = torch.stack(centers, dim=0)
-        else:
-            centers_tensor = torch.zeros((0, num_gaussians, 2), dtype=torch.float32)
-
+        flows_tensor = torch.stack(flows, dim=0)
+        weights_tensor = torch.stack(weights, dim=0)
+        centers_tensor = torch.stack(centers, dim=0)
+        
         batch_flows.append(flows_tensor)
         batch_weights.append(weights_tensor)
         batch_centers.append(centers_tensor)
@@ -576,9 +502,7 @@ def get_zeroshot_flow(data, chunk=32):
     return batch_flows, batch_weights, batch_centers
 
 def track_points_with_occlusions(points_xyz, flows, weights, centers, image_size,
-                                 topk=8, tau_vis=0.05, tau_re=0.08,
-                                 visible_mode="hybrid", beta_hybrid=0.3,
-                                 beta_scale_with_mass=True):
+                                 topk=8, tau_vis=0.05, beta_hybrid=0.3):
     """
     Wrapper that converts query points and runs occlusion-aware tracking.
     Returns:
@@ -608,10 +532,7 @@ def track_points_with_occlusions(points_xyz, flows, weights, centers, image_size
         centers_np,
         topk=topk,
         tau_vis=tau_vis,
-        tau_re=tau_re,
-        visible_mode=visible_mode,
         beta_hybrid=beta_hybrid,
-        beta_scale_with_mass=beta_scale_with_mass,
     )
     traj = traj.astype(np.float32)
     if image_size is not None:
@@ -690,10 +611,7 @@ class ZeroshotLitModule(LightningModule):
             
         hsize = self.encoder.patch_embed.proj.weight.shape[0]
 
-        if "attn" in self.cfg.training_type:
-            self.linear_layer = nn.ModuleList([torch.nn.Sequential(attntion_probe(8, hsize, hsize), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
-        else:
-            self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
+        self.linear_layer = nn.ModuleList([torch.nn.Sequential(torch.nn.BatchNorm1d(hsize, affine=False, eps=1e-6), nn.Linear(hsize,self.cfg.num_classes)) for i in range(num_hidden_layers)])
         self.test_rfid = FrechetInceptionDistance()
   
     def forward_loss(self, imgs, pred, mask, frame_num=None, deltas=None, additional_data=None):
@@ -708,14 +626,13 @@ class ZeroshotLitModule(LightningModule):
         device = video.device
         dtype = video.dtype
 
-        latent, mask, ids_restore, latent_layers = self.encoder.forward_encoder(video, mask_ratio=0.0)
+        latent, mask, ids_restore, _ = self.encoder.forward_encoder(video, mask_ratio=0.0)
 
         imagenet_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).to(device=device).to(dtype=dtype)
         imagenet_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).to(device=device).to(dtype=dtype)
         imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
         imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
 
-        preds_all = []
         with torch.no_grad():
             x_points = self.encoder.forward_decoder(latent, ids_restore)
                 
@@ -725,38 +642,6 @@ class ZeroshotLitModule(LightningModule):
         
         # zeroshot tracking
         scale_factor = np.array([1, self.cfg.input_size, self.cfg.input_size])
-
-        inference_cfg = getattr(self.cfg, "inference", None)
-        tau_vis = 0.5
-        tau_re = 0.08
-        tracking_topk = 8
-        visible_mode = "hybrid"
-        beta_hybrid = 0.3
-        beta_scale_with_mass = True
-        if inference_cfg is not None:
-            tau_vis_val = getattr(inference_cfg, "tau_vis", None)
-            if tau_vis_val is not None:
-                tau_vis = float(tau_vis_val)
-            tau_re_val = getattr(inference_cfg, "tau_re", None)
-            if tau_re_val is not None:
-                tau_re = float(tau_re_val)
-            topk_val = getattr(inference_cfg, "tracking_topk", None)
-            if topk_val is not None:
-                tracking_topk = int(topk_val)
-            visible_mode_val = getattr(inference_cfg, "visible_mode", None)
-            if visible_mode_val is not None:
-                visible_mode = str(visible_mode_val).lower()
-            beta_hybrid_val = getattr(inference_cfg, "beta_hybrid", None)
-            if beta_hybrid_val is not None:
-                beta_hybrid = float(beta_hybrid_val)
-            beta_scale_val = getattr(inference_cfg, "beta_scale_with_mass", None)
-            if beta_scale_val is not None:
-                if isinstance(beta_scale_val, str):
-                    beta_scale_with_mass = beta_scale_val.lower() in {"1", "true", "yes", "y"}
-                else:
-                    beta_scale_with_mass = bool(beta_scale_val)
-        if visible_mode not in {"flow", "mixture", "hybrid"}:
-            visible_mode = "hybrid"
 
         if torch.is_tensor(init_queries):
             init_queries_np = init_queries.detach().cpu().numpy()
@@ -793,12 +678,9 @@ class ZeroshotLitModule(LightningModule):
                 weights_np,
                 centers_np,
                 self.cfg.input_size,
-                topk=tracking_topk,
-                tau_vis=tau_vis,
-                tau_re=tau_re,
-                visible_mode=visible_mode,
-                beta_hybrid=beta_hybrid,
-                beta_scale_with_mass=beta_scale_with_mass,
+                topk=self.cfg.inference.topk,
+                tau_vis=self.cfg.inference.tau_vis,
+                beta_hybrid=self.cfg.inference.beta_hybrid,
             )
 
             tracks_full = np.zeros((tracks.shape[0], queries.shape[0], 2), dtype=np.float32)
@@ -846,10 +728,10 @@ class ZeroshotLitModule(LightningModule):
                 imgs = (video * imagenet_std[None, :, None, None, None]) + imagenet_mean[None, :, None, None, None]
                 imgs = (imgs.permute(0, 2, 3, 4, 1).cpu().numpy() * 255).astype(np.uint8)
                 data = {"video": imgs, "init_queries": init_queries, "points_pred": x_points, "occlusions_pred": occlusions_pred, "points_gt": finetune_target, "occlusions_gt": occluded_points}
-                torch.save(data, f"{self.cfg.storage_folder}/tests/gmrw-davis_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
+                torch.save(data, f"{self.cfg.storage_folder}/tests/zeroshot_{self.cfg.inference.context_length}_{self.current_epoch}_{batch_idx}.pt")
                 
             # title = f"eval_{self.cfg.inference.context_length}" if "eval" in self.cfg.training_type else "kubric"
-            title = f"gmrw-davis_{self.cfg.inference.context_length}"
+            title = f"zeroshot_{self.cfg.inference.context_length}"
             clip = ImageSequenceClip(final_image_, fps=1).resize(2)  # fps can be adjusted to your need
             clip.write_videofile(f"{self.cfg.storage_folder}/tests/{title}_{self.current_epoch}_{batch_idx}_video.mp4", codec='libx264')
 
@@ -928,8 +810,6 @@ class ZeroshotLitModule(LightningModule):
         occ_fn = self.occ_fn.compute()
         precision = occ_tp / (occ_tp + occ_fp)
         recall = occ_tp / (occ_tp + occ_fn)
-        occ_f1 = 2 * ((precision * recall) / (precision + recall))
-        self.log(f"{metric_prefix}/occ_f1", occ_f1, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
 
         jaccard_score = self.average_jaccard.compute()
         self.log(f"{metric_prefix}/jaccard", jaccard_score, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -955,18 +835,11 @@ class ZeroshotLitModule(LightningModule):
         log.info("\n " + self.cfg.storage_folder +  " : Validation epoch " + str(self.current_epoch) + " ended.")
         metric_prefix = "test" if self.cfg.inference.testing else "val"
 
-        log.info("Jaccard Score : " + str(self.average_jaccard.compute().item()))
-        log.info("Avg Distance : " + str(self.avg_distance.compute().item()))
-        log.info("Avg Points within Thresh : " + str(self.average_pts_within_thresh.compute().item()))
-        log.info("Occlusion Accuracy : " + str(self.occlusion_accuracy.compute().item()))
-
         occ_tp = self.occ_tp.compute()
         occ_fp = self.occ_fp.compute()
         occ_fn = self.occ_fn.compute()
         precision = occ_tp / (occ_tp + occ_fp)
         recall = occ_tp / (occ_tp + occ_fn)
-        occ_f1 = 2 * ((precision * recall) / (precision + recall))
-        log.info("Occlusion F1 Score : " + str(occ_f1.item()))
 
         # reset the metric
         self.average_jaccard.reset()
@@ -1107,93 +980,6 @@ class ZeroshotLitModule(LightningModule):
         print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
         optim_params = list(parameter_group_vars.values())
         return optim_params
-
-    def configure_optimizers(self):
-        """Choose what optimizers and learning-rate schedulers to use in your optimization.
-        Normally you'd need one. But in the case of GANs or similar you might have multiple.
-
-        Examples:
-            https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#configure-optimizers
-        """
-
-        # linear learning rate scaling for multi-gpu
-        if(self.trainer.num_devices * self.trainer.num_nodes>1 and self.cfg.apply_linear_scaling):
-            self.lr_scaler = self.trainer.num_devices * self.trainer.num_nodes * self.trainer.accumulate_grad_batches * self.cfg.train_batch_size / 256
-        else:
-            self.lr_scaler = 1
-
-        # print devices, nodes, batchsize, and total number of parameters
-        log.info("num_devices: {}, num_nodes: {}, accumulate_grad_batches: {}, train_batch: {}".format(self.trainer.num_devices, self.trainer.num_nodes, self.trainer.accumulate_grad_batches, self.cfg.train_batch_size))
-        log.info("Linear LR scaling factor: {}".format(self.lr_scaler))
-        log.info(f"Total number of trainable parameters : {sum(p.numel() / 1024 / 1024 for p in self.trainer.model.parameters() if p.requires_grad):.6f} million")
-
-        if(self.cfg.layer_decay is not None):
-            optim_params = self.get_param_groups()
-        else:
-            optim_params = [{'params': filter(lambda p: p.requires_grad, self.trainer.model.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
-
-        if(self.cfg.solver=="LARS"):
-            optim_params = [{'params': filter(lambda p: p.requires_grad, self.linear_layer.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
-            optimizer = LARS(params=optim_params, weight_decay=self.cfg.weight_decay)
-        elif(self.cfg.solver=="LAMB"):
-            optim_params = [{'params': filter(lambda p: p.requires_grad, self.linear_layer.parameters()), 'lr': self.cfg.lr * self.lr_scaler}]
-            optimizer = Lamb(params=optim_params, weight_decay=self.cfg.weight_decay)
-        elif(self.cfg.solver=="AdamW"):
-            optim_params = add_weight_decay(self.trainer.model, self.cfg.weight_decay)
-            optimizer = optim.AdamW(params=optim_params, lr=self.cfg.lr * self.lr_scaler, betas=(0.9, 0.95))
-        elif(self.cfg.solver=="AdamW-layer"):
-            optim_params = add_weight_decay(self.trainer.model, self.cfg.weight_decay)
-            optimizer = optim.AdamW(params=optim_params, lr=self.cfg.lr * self.lr_scaler, betas=(0.9, 0.95))
-        else:
-            raise NotImplementedError("Unknown solver : " + self.cfg.solver)
-
-        def warm_start_and_cosine_annealing(epoch):
-            if epoch < self.cfg.warmup_epochs:
-                lr = (epoch+1) / self.cfg.warmup_epochs
-            else:
-                lr = 0.5 * (1. + math.cos(math.pi * ((epoch+1) - self.cfg.warmup_epochs) / (self.trainer.max_epochs - self.cfg.warmup_epochs )))
-            return lr
-
-        def warm_start_and_cosine_annealing_step(step):
-            if step < self.cfg.warmup_steps: # here we use step instead of epoch
-                lr = (step+1) / self.cfg.warmup_steps
-            else:
-                lr = 0.5 * (1. + math.cos(math.pi * ((step+1) - self.cfg.warmup_steps) / (self.trainer.max_epochs*self.trainer.num_training_batches - self.cfg.warmup_steps )))
-            return lr
-
-        def inverse_sqrt_annealing(epoch):
-            if epoch < self.cfg.warmup_epochs:
-                lr = (epoch+1) / self.cfg.warmup_epochs
-            else:
-                lr = 1/math.sqrt(epoch+1 - self.cfg.warmup_epochs)
-            return lr
-
-        def linear_annealing(epoch):
-            if epoch < self.cfg.warmup_epochs:
-                lr = (epoch+1) / self.cfg.warmup_epochs
-            else:
-                lr = 1 - (epoch+1 - self.cfg.warmup_epochs)/(self.trainer.max_epochs - self.cfg.warmup_epochs)
-            return lr
-
-        if(self.cfg.scheduler == "cosine"):
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[warm_start_and_cosine_annealing for _ in range(len(optim_params))], verbose=False)
-        elif(self.cfg.scheduler == "cosine_step"):
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[warm_start_and_cosine_annealing_step for _ in range(len(optim_params))], verbose=False)
-        elif(self.cfg.scheduler == "inv_sqrt"):
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[inverse_sqrt_annealing for _ in range(len(optim_params))], verbose=False)
-        elif(self.cfg.scheduler == "linear"):
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[linear_annealing for _ in range(len(optim_params))], verbose=False)
-        else:
-            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, self.cfg.decay_steps, gamma=self.cfg.decay_gamma, verbose=False)
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval" : self.cfg.lr_interval,
-                'frequency': 1,
-            }
-        }
 
 
 if __name__ == "__main__":

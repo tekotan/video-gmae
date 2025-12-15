@@ -180,3 +180,4 @@ weights/
 a/
 evals/
 results/**
+*.ckpt

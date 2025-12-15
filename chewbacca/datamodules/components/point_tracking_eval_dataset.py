@@ -12,7 +12,8 @@ def random_crop_4d(
     frames_4d: torch.Tensor,
     points_3d: np.ndarray,
     occlusions: np.ndarray,
-    crop_size: int
+    crop_size: int,
+    rng: np.random.Generator
 ):
     """
     Randomly crop a [length, 3, H, W] tensor of frames to [length, 3, crop_size, crop_size]
@@ -22,6 +23,7 @@ def random_crop_4d(
         frames_4d:  Tensor of shape (3, length, H, W)
         points_3d:  Numpy array of shape (N, length, 2)
         crop_size:  Desired output spatial size
+        rng:        Numpy random generator seeded upstream
     Returns:
         cropped_frames:  (3, length, crop_size, crop_size)
         adjusted_points: (N, length, 2) - shifted/clamped coordinates
@@ -39,8 +41,8 @@ def random_crop_4d(
         x_off = max(0, (W - crop_size) // 2)
     else:
         # Random offsets in [0, H - crop_size], [0, W - crop_size]
-        y_off = np.random.randint(0, H - crop_size + 1)
-        x_off = np.random.randint(0, W - crop_size + 1)
+        y_off = rng.integers(0, H - crop_size + 1)
+        x_off = rng.integers(0, W - crop_size + 1)
 
     # 1) Crop the frames
     cropped_frames = frames_4d[:, :, y_off : y_off + crop_size, x_off : x_off + crop_size]
@@ -98,6 +100,7 @@ class PointTrackingEvalDataset(IterableDataset):
         super().__init__()
         self.cfg = cfg
         self.bin_size = min(24, self.cfg.seq_length)
+        self.rng = np.random.default_rng(self.cfg.seed)
         self.all_items = []
 
         nearest_power_of_two = 2 ** int(np.ceil(np.log2(self.cfg.input_size)))
@@ -188,7 +191,8 @@ class PointTrackingEvalDataset(IterableDataset):
                     frames_chunk,         # shape (3, length, H, W)
                     points_chunk_np,      # shape (N, length, 2)
                     occluded_chunk_np,    # shape (N, length)
-                    self.cfg.input_size
+                    self.cfg.input_size,
+                    self.rng
                 )
                 # frames_chunk:  (length, 3, crop_size, crop_size)
                 # points_chunk_np: (N, length, 2) adjusted
@@ -226,7 +230,9 @@ class PointTrackingEvalDataset(IterableDataset):
                     pad_occluded = torch.ones(diff, length, dtype=occluded_points_torch.dtype)
                     occluded_points_torch = torch.cat([occluded_points_torch, pad_occluded], dim=0)
                 if N > self.cfg.finetune_params.tracks_to_sample:
-                    random_idx = np.random.choice(N, self.cfg.finetune_params.tracks_to_sample, replace=False)
+                    random_idx = self.rng.choice(
+                        N, self.cfg.finetune_params.tracks_to_sample, replace=False
+                    )
                     target_points_torch = target_points_torch[random_idx]
                     query_points_torch = query_points_torch[random_idx]
                     occluded_points_torch = occluded_points_torch[random_idx]
