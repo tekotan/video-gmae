@@ -12,22 +12,21 @@ Code release for the video masked autoencoder models used for point tracking exp
 
 Tested with Python 3.10 and CUDA 12.1.
 
+Pixi (recommended)
 ```bash
-# create and activate the environment
+# install pixi: https://pixi.sh
+git clone https://github.com/tekotan/video-gmae.git && cd video-gmae
+pixi install      # resolves the env with CUDA 12.1 PyTorch + deps
+pixi run install  # editable install of the chewbacca package
+pixi shell        # drop into the environment
+```
+
+Conda (fallback)
+```bash
 conda create -n chewbacca python=3.10
 conda activate chewbacca
-
-# install PyTorch with CUDA 12.1
 conda install pytorch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 pytorch-cuda=12.1 -c pytorch -c nvidia
-
-# clone the repo and install dependencies
-git clone https://github.com/<your-org>/video-gmae.git && cd video-gmae
 pip install -r requirements.txt
-
-# xformers: conda binary is fastest; fall back to pip if needed
-conda install xformers -c xformers  # or: pip install xformers==0.0.24
-
-# editable install for the chewbacca package
 pip install -e .
 ```
 
