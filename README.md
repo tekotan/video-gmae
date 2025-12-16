@@ -8,6 +8,8 @@
 
 Code release for the video masked autoencoder models used for point tracking experiments on TAP-Vid (Kinetics and DAVIS). The repo ships the evaluation configs and checkpoints used in the paper, plus small helpers for working with the TAP-Vid pickles.
 
+Project page: https://videogmae.org/
+
 ## Installation
 
 Tested with Python 3.10 and CUDA 12.1 on Ubuntu 24.04.
@@ -41,6 +43,9 @@ pip install -e .
 The evaluation scripts expect checkpoints under `checkpoints/` and TAP-Vid pickles under a `data-download/` directory at the repo root (Hydra sets `PROJECT_ROOT`, so relative paths work even when the working directory changes).
 
 ### Checkpoints
+
+Download the released checkpoints from Google Drive:
+https://drive.google.com/drive/folders/14wnHnJfeCS9VMaSgcmTidi0F-eCSNkEA?usp=sharing
 
 Place the released weights in `checkpoints/` with these filenames (matching the scripts):
 - `checkpoints/zeroshot_checkpoint.ckpt` – zero-shot GMAE
