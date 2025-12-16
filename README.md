@@ -10,7 +10,7 @@ Code release for the video masked autoencoder models used for point tracking exp
 
 ## Installation
 
-Tested with Python 3.10 and CUDA 12.1.
+Tested with Python 3.10 and CUDA 12.1 on Ubuntu 24.04.
 
 Pixi (recommended)
 ```bash
@@ -48,7 +48,7 @@ Place the released weights in `checkpoints/` with these filenames (matching the 
 
 ### TAP-Vid data
 
-Follow the official TAP-Vid download instructions (DAVIS and Kinetics) in the TAPNet repository: https://github.com/google-deepmind/tapnet/blob/main/tapnet/tapvid/README.md. If you already have the raw videos, you can also generate pickles with `chewbacca/utils/generate_tapvid.py`.
+Follow the official TAP-Vid download instructions (DAVIS and Kinetics) in the TAPNet repository: https://github.com/google-deepmind/tapnet/blob/main/tapnet/tapvid/README.md.
 
 Layout expected by the eval scripts:
 
