@@ -16,18 +16,22 @@ Pixi (recommended)
 ```bash
 # install pixi: https://pixi.sh
 git clone https://github.com/tekotan/video-gmae.git && cd video-gmae
-pixi install      # resolves the env with CUDA 12.1 PyTorch + deps
-pixi run install  # editable install of the chewbacca package
-pixi shell        # drop into the environment
+pixi install       # resolve the env (Linux, CUDA 12.1, torch 2.1 + xformers)
+pixi run install   # editable install of this repo
+pixi shell         # drop into the environment
+# optional extras (inside pixi shell), e.g. kubric data utils:
+# pip install '.[kubric,wandb]'
 ```
 
 Conda (fallback)
 ```bash
 conda create -n chewbacca python=3.10
 conda activate chewbacca
-conda install pytorch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 pytorch-cuda=12.1 -c pytorch -c nvidia
+conda install pytorch==2.1.0 torchvision==0.16.0 pytorch-cuda=12.1 -c pytorch -c nvidia
 pip install -r requirements.txt
 pip install -e .
+# optional extras:
+# pip install '.[kubric,wandb]'
 ```
 
 `pyrootutils` will set `PROJECT_ROOT` for you when running the scripts, so everything works from the repo root.

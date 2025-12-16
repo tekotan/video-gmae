@@ -7,17 +7,20 @@ joblib==1.4.2
 lightning==2.4.0
 lpips==0.1.4
 moviepy==1.0.3
+ninja==1.11.1.1
 numpy==1.26.4
 opencv-python==4.10.0.84
 pyrootutils==1.0.4
 rich==13.8.1
 scikit-image==0.25.0
 timm==1.0.9
-torch==2.2.0
-torchaudio==2.2.0
+torch==2.1.2
+torchaudio==2.1.2
 torchmetrics==1.4.2
-torchvision==0.17.0
+torchvision==0.16.2
 transformers==4.44.2
 tqdm==4.66.5
 webdataset==0.2.100
-xformers==0.0.24
+# Linux only (xformers wheels target Linux; skip on macOS/Windows unless building from source)
+xformers==0.0.22.post7
+git+https://github.com/brjathu/LART.git

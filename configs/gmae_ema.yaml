@@ -9,7 +9,6 @@ defaults:
 callbacks:
     model_checkpoint:
         _target_: lightning.pytorch.callbacks.ModelCheckpoint
-        # _target_: lart.utils.ema_checkpoint.EMACheckpoint
         dirpath: ${paths.output_dir}/checkpoints
         filename: "epoch_{epoch:03d}"
         monitor: "val/loss/loss"

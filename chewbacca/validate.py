@@ -10,7 +10,7 @@ from lightning.pytorch.loggers import Logger
 from omegaconf import DictConfig
 import lightning as pl
 
-from lart import utils
+from chewbacca import utils
 
 log = utils.get_pylogger(__name__)
 

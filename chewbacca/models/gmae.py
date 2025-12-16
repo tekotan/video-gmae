@@ -9,10 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-# import transformers
-# import xformers.ops as xops
 from einops import rearrange
-# from lart.models.components.tokeizers.tokenizer import Tokenizer
 from lightning import LightningModule
 from moviepy.editor import ImageSequenceClip
 from omegaconf import DictConfig

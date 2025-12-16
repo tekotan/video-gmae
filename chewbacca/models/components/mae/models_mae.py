@@ -26,9 +26,6 @@ from gsplat.rasterize import RasterizeGaussians
 
 from timm.models.vision_transformer import PatchEmbed, Block
 
-# from lart.models.components.mae.pos_embed import (get_2d_sincos_pos_embed,
-#                                                   get_3d_sincos_pos_embed)
-
 
 
 # Copyright (c) Meta Platforms, Inc. and affiliates.

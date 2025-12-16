@@ -181,3 +181,5 @@ a/
 evals/
 results/**
 *.ckpt
+pixi.lock
+.pixi

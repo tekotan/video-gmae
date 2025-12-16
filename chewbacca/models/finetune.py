@@ -12,19 +12,12 @@ import torch.optim as optim
 import transformers
 import xformers.ops as xops
 from einops import rearrange
-# from lart.models.components.tokeizers.tokenizer import Tokenizer
 from lightning import LightningModule
 from moviepy.editor import ImageSequenceClip
 from omegaconf import DictConfig
-from timm.data.mixup import Mixup
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from torch import nn
 from torchmetrics import MeanMetric, MeanSquaredError, SumMetric
-from torchmetrics.aggregation import CatMetric
 from torchmetrics.classification.accuracy import Accuracy
-from torchmetrics.image.fid import FrechetInceptionDistance
-from torchmetrics.image.psnr import PeakSignalNoiseRatio
-from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 
 from torchvision.ops import complete_box_iou_loss
 
