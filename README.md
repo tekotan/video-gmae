@@ -1,14 +1,19 @@
 <!-- import the image.webp -->
 
-<p align="center">
+<div align="center">
   <img src="assets/intro.png" alt="videogmae" width="750" />
-</p>
+  <h1 style="margin-bottom: 0.2rem;">Tracking by Predicting 3‑D Gaussians Over Time</h1>
+  <p><em>VidGMAE</em></p>
+  <p>
+    <a href="https://videogmae.org/">Project Page</a> ·
+    <a href="https://arxiv.org/abs/TODO">Paper (arXiv)</a> ·
+    <a href="https://videogmae.org/">PDF</a>
+  </p>
+</div>
 
-# Tracking by Predicting 3-D Gaussians Over Time
+<!-- TODO: replace the arXiv link above when available. -->
 
 Code release for the video masked autoencoder models used for point tracking experiments on TAP-Vid (Kinetics and DAVIS). The repo ships the evaluation configs and checkpoints used in the paper, plus small helpers for working with the TAP-Vid pickles.
-
-Project page: https://videogmae.org/
 
 ## Installation
 
