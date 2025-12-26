@@ -5,10 +5,10 @@ from setuptools import find_packages, setup
 setup(
     name="vidgmae",
     version="0.0.0",
-    description="Large scale training code for anything.",
-    author="Jathushan Rajasegaran",
-    author_email="jathushan@berkeley.edu",
-    url="https://github.com/brjathu/vidgmae",  # REPLACE WITH YOUR OWN GITHUB PROJECT LINK
+    description="Tracking by Predicting 3‑D Gaussians Over Time.",
+    author="Tanish Baranwal",
+    author_email="tanish@berkeley.edu",
+    url="https://github.com/tekotan/video-gmae",  # REPLACE WITH YOUR OWN GITHUB PROJECT LINK
     packages=find_packages(),
     install_requires=[
         "absl-py==2.1.0",
