@@ -1,7 +1,7 @@
 <!-- import the image.webp -->
 
 <p align="center">
-  <img src="assets/intro.png" alt="videogmae" width="300" />
+  <img src="assets/intro.png" alt="videogmae" width="750" />
 </p>
 
 # Tracking by Predicting 3-D Gaussians Over Time
