@@ -1,7 +1,7 @@
 <!-- import the image.webp -->
 
 <p align="center">
-  <img src="assets/chewbacca.webp" alt="Chewbacca" width="300" />
+  <img src="assets/intro.png" alt="videogmae" width="300" />
 </p>
 
 # Tracking by Predicting 3-D Gaussians Over Time
@@ -27,8 +27,8 @@ pixi shell         # drop into the environment
 
 Conda (fallback)
 ```bash
-conda create -n chewbacca python=3.10
-conda activate chewbacca
+conda create -n vidgmae python=3.10
+conda activate vidgmae
 conda install pytorch==2.1.0 torchvision==0.16.0 pytorch-cuda=12.1 -c pytorch -c nvidia
 pip install -r requirements.txt
 pip install -e .
@@ -66,7 +66,7 @@ data-download/
 │   └── 0000_of_0010.pkl ... 0009_of_0010.pkl # optional full shards
 ```
 
-If you store the data elsewhere, update the paths in `chewbacca/datamodules/finetune_datamodule.py` (training types `eval-davis` and `eval-kinetics`).
+If you store the data elsewhere, update the paths in `vidgmae/datamodules/finetune_datamodule.py` (training types `eval-davis` and `eval-kinetics`).
 
 ## Reproducing evaluations
 

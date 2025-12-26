@@ -1,8 +1,8 @@
 # !/bin/bash
-python chewbacca/validate.py -m \
+python vidgmae/validate.py -m \
 --config-name gmae_ema.yaml \
-model._target_="chewbacca.models.finetune.FinetuneLitModule" \
-datamodule._target_="chewbacca.datamodules.finetune_datamodule.FinetuneDataModule" \
+model._target_="vidgmae.models.finetune.FinetuneLitModule" \
+datamodule._target_="vidgmae.datamodules.finetune_datamodule.FinetuneDataModule" \
 task_name=vgmae_large_seq16_finetune_point_v1 \
 trainer=ddp_unused \
 trainer.devices=1 \
