@@ -3,7 +3,7 @@
 <div align="center">
   <img src="assets/intro.png" alt="videogmae" width="750" />
   <h1 style="margin-bottom: 0.2rem;">Tracking by Predicting 3‑D Gaussians Over Time</h1>
-  <p><em>VidGMAE</em></p>
+  <p><em>VideoGMAE</em></p>
   <p>
     <a href="https://videogmae.org/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
     <a href="https://arxiv.org/abs/TODO"><img src="https://img.shields.io/badge/arXiv-TODO-b31b1b.svg" alt="arXiv"></a>
