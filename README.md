@@ -44,7 +44,7 @@ pip install -e .
 
 ## Checkpoints and data
 
-The evaluation scripts expect checkpoints under `checkpoints/` and TAP-Vid pickles under a `data-download/` directory at the repo root (Hydra sets `PROJECT_ROOT`, so relative paths work even when the working directory changes).
+The evaluation scripts expect checkpoints under `checkpoints/` and TAP-Vid pickles under a `data-download/` directory at the repo root.
 
 ### Checkpoints
 
