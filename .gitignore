@@ -31,7 +31,6 @@ core
 LAION/
 *.pkl
 *.pth
-*.png
 outputs/
 *.nfs*
 
