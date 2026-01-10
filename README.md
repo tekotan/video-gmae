@@ -6,7 +6,7 @@
   <p><em>VideoGMAE</em></p>
   <p>
     <a href="https://videogmae.org/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
-    <a href="https://arxiv.org/abs/TODO"><img src="https://img.shields.io/badge/arXiv-TODO-b31b1b.svg" alt="arXiv"></a>
+    <a href="https://arxiv.org/abs/2512.22489"><img src="https://img.shields.io/badge/arXiv-2512.22489-b31b1b.svg" alt="arXiv"></a>
   </p>
 </div>
 
